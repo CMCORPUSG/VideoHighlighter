@@ -5,13 +5,14 @@ from modules.system.app_paths import ffmpeg_exe
 from modules.system.encoder_select import encoder_chain
 
 
-def cut_video(video_path, start_time, end_time, output_path, mode="gpu"):
+def cut_video(video_path, start_time, end_time, output_path, mode="auto"):
     """Cut [start_time, end_time] out of video_path into output_path.
 
     `mode`:
       - "cpu": re-encode with libx265 (HEVC/VR) or libx264 — VR-safe, slow.
-      - "gpu" (default): re-encode with the fastest hardware encoder, CPU
+      - "auto" (default): re-encode with the fastest hardware encoder, CPU
         fallback. Fast, but hardware HEVC may not play in some VR players.
+      - "nvenc": prefer NVIDIA NVENC and fall back to CPU.
 
     Pixel format is normalized to yuv420p so 10-bit VR sources don't break the
     encoders."""
@@ -37,7 +38,7 @@ def cut_video(video_path, start_time, end_time, output_path, mode="gpu"):
         result = subprocess.run(cmd, capture_output=True, text=True)
         if result.returncode == 0 and os.path.exists(output_path):
             print(f"Clip saved: {output_path} [{enc}]")
-            return
+            return enc
         last_err = (result.stderr or "").strip()[-500:] or "unknown error"
         # Include ffmpeg's own message: the return code alone (e.g. QSV's
         # 0xB1B1B1AB) tells you nothing, and when the whole chain fails this is

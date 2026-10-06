@@ -421,6 +421,7 @@ def run_highlighter(video_path, sample_rate=5, gui_config: dict = None,
     # ========== SINGLE FILE PROCESSING ==========
     gui_config = gui_config or {}
     log = log_fn
+    pipeline_started_at = time.time()
     
     # Create progress tracker
     progress = ProgressTracker(progress_fn, log_fn)
@@ -461,12 +462,11 @@ def run_highlighter(video_path, sample_rate=5, gui_config: dict = None,
         EXPORT_CLIPS = bool(gui_config.get(
             "export_separate_clips",
             config.get("highlights", {}).get("export_separate_clips", False)))
-        # How the final clips are cut/encoded: "cpu" (libx265/libx264 re-encode,
-        # VR-safe, slow) or "gpu" (hardware re-encode, fast, may not play in some
-        # VR players).
-        RENDER_MODE = gui_config.get("render_mode", config.get("highlights", {}).get("render_mode", "cpu"))
-        if RENDER_MODE not in ("cpu", "gpu"):
-            RENDER_MODE = "cpu"
+        # How the final clips are cut/encoded: automatic hardware selection,
+        # NVIDIA NVENC, or a CPU path kept for VR player compatibility.
+        RENDER_MODE = gui_config.get("render_mode", config.get("highlights", {}).get("render_mode", "auto"))
+        if RENDER_MODE not in ("cpu", "gpu", "auto", "nvenc"):
+            RENDER_MODE = "auto"
 
         # Transcript settings
         USE_TRANSCRIPT = gui_config.get("use_transcript", False) and TRANSCRIPT_AVAILABLE
@@ -788,12 +788,32 @@ def run_highlighter(video_path, sample_rate=5, gui_config: dict = None,
         using_cache = 'cached_data' in locals() and cached_data is not None
         # ========== END CACHE CHECK ==========
 
+        stage_cache = None
+        completed_stages = {}
+        if use_cache and not using_cache and not USE_TIME_RANGE:
+            try:
+                stage_cache = VideoAnalysisCache(
+                    cache_dir=gui_config.get("cache_dir", "./cache"))
+                if not force_reprocess:
+                    completed_stages = stage_cache.load_stages(
+                        processed_video_path, analysis_params)
+                if completed_stages:
+                    log("Se encontraron etapas anteriores: " +
+                        ", ".join(sorted(completed_stages)))
+            except Exception as exc:
+                log(f"No se pudieron leer las etapas anteriores: {exc}")
+
         # --- Transcript processing ---
         if not using_cache:
             # Original transcript processing code
-            if USE_TRANSCRIPT:
+            if USE_TRANSCRIPT and "transcript" in completed_stages:
+                transcript_segments = completed_stages["transcript"].get("segments", [])
+                keyword_matches = completed_stages["transcript"].get("keyword_matches", [])
+                log("ℹ️ Se reutilizó la transcripción terminada")
+            elif USE_TRANSCRIPT:
                 progress.update_progress(5, 100, "Pipeline", "Processing transcript...")
                 log("🔹 Step 0.5: Processing transcript...")
+                transcript_ok = False
                 try:
                     check_cancellation(cancel_flag, log, "transcript processing")
                     transcript_segments = get_transcript_segments(
@@ -820,6 +840,7 @@ def run_highlighter(video_path, sample_rate=5, gui_config: dict = None,
                     with open(transcript_file, "w", encoding="utf-8") as f:
                         f.write(transcript_text)
                     log(f"✅ Transcript saved: {transcript_file}")
+                    transcript_ok = True
                 except RuntimeError as e:
                     # Cancellation arrives as a RuntimeError and stops the run.
                     # So did every Whisper and torch failure, unlogged — a video
@@ -855,6 +876,14 @@ def run_highlighter(video_path, sample_rate=5, gui_config: dict = None,
                         log(f"   In {len(transcript_segments)} transcript segments")
                 else:
                     keyword_matches = []
+
+                if transcript_ok and stage_cache and not (cancel_flag and cancel_flag.is_set()):
+                    try:
+                        stage_cache.save_stage(processed_video_path, analysis_params,
+                                               "transcript", {"segments": transcript_segments,
+                                                              "keyword_matches": keyword_matches})
+                    except Exception as exc:
+                        log(f"⚠️ No se pudo guardar la transcripción: {exc}")
 
         else:
             log("ℹ️ Using cached transcript")
@@ -911,8 +940,18 @@ def run_highlighter(video_path, sample_rate=5, gui_config: dict = None,
         if motion_backfill:
             log(_describe_backfill("motion"))
 
-        if not using_cache or motion_backfill:
+        motion_resume = (not using_cache and motion_wanted
+                         and "motion" in completed_stages)
+        if motion_resume:
+            motion_stage = completed_stages["motion"]
+            scenes = motion_stage.get("scenes", [])
+            motion_events = motion_stage.get("motion_events", [])
+            motion_peaks = motion_stage.get("motion_peaks", [])
+            log("ℹ️ Se reutilizaron escenas y movimiento terminados")
+
+        if (not using_cache and not motion_resume) or motion_backfill:
             progress.update_progress(10, 100, "Pipeline", "Detecting motion and scenes...")
+            motion_ok = False
 
             # Skip motion detection if all motion-related points are 0
             if not motion_wanted:
@@ -948,6 +987,7 @@ def run_highlighter(video_path, sample_rate=5, gui_config: dict = None,
                     # Unpack the results
                     if result and len(result) == 3:
                         scenes, motion_events, motion_peaks = result
+                        motion_ok = True
                         log(f"✅ Motion detection results: {len(scenes)} scenes, {len(motion_events)} motion events, {len(motion_peaks)} motion peaks")
                     else:
                         log(f"⚠️ Unexpected motion detection result format: {result}")
@@ -961,6 +1001,14 @@ def run_highlighter(video_path, sample_rate=5, gui_config: dict = None,
 
                 # Add progress update after motion detection
                 progress.update_progress(25, 100, "Pipeline", f"Motion detection complete: {len(scenes)} scenes, {len(motion_events)} events, {len(motion_peaks)} peaks")
+                if motion_ok and stage_cache and not (cancel_flag and cancel_flag.is_set()):
+                    try:
+                        stage_cache.save_stage(processed_video_path, analysis_params,
+                                               "motion", {"scenes": scenes,
+                                                          "motion_events": motion_events,
+                                                          "motion_peaks": motion_peaks})
+                    except Exception as exc:
+                        log(f"⚠️ No se pudo guardar el movimiento: {exc}")
         else:
             log("ℹ️ Using cached motion analysis")
             progress.update_progress(25, 100, "Pipeline", "Loaded cached motion analysis")
@@ -974,6 +1022,15 @@ def run_highlighter(video_path, sample_rate=5, gui_config: dict = None,
         audio_peaks = audio_peaks if 'audio_peaks' in locals() else []
         waveform_data = None
         audio_backfill = False   # set below only on a cached pass; see analysis_plan
+        saved_audio = completed_stages.get("audio", {})
+        loudness_requested = bool(gui_config.get(
+            "loudness_burst_points",
+            config.get("scoring", {}).get("loudness_burst_points", 0)))
+        audio_resume = (not using_cache and "audio" in completed_stages
+                        and (not effective_points["audio_peak_points"]
+                             or saved_audio.get("peaks_computed", False))
+                        and (not loudness_requested
+                             or saved_audio.get("loudness_computed", False)))
 
         def _get_cached_waveform(cached):
             if not cached:
@@ -995,16 +1052,18 @@ def run_highlighter(video_path, sample_rate=5, gui_config: dict = None,
             # Legacy layout: top-level "audio_peaks"
             return cached.get("audio_peaks") or []
 
-        if using_cache:
+        if using_cache or audio_resume:
             log("ℹ️ Using cached audio data")
-            audio_peaks = _get_cached_audio_peaks(cached_data)
-            waveform_data = _get_cached_waveform(cached_data)
+            audio_source = (cached_data if using_cache else
+                            {"audio": completed_stages["audio"]})
+            audio_peaks = _get_cached_audio_peaks(audio_source)
+            waveform_data = _get_cached_waveform(audio_source)
 
             # Same trap as motion: `audio_peak_points` gates the detector but is
             # a scoring weight, so a cache written with it at zero holds an empty
             # peak list that raising the weight could never refill.
             audio_backfill = needs_backfill(
-                "audio_peaks", effective_points, using_cache=True,
+                "audio_peaks", effective_points, using_cache=using_cache,
                 values=(audio_peaks,))
             if audio_backfill:
                 log(_describe_backfill("audio_peaks"))
@@ -1076,6 +1135,7 @@ def run_highlighter(video_path, sample_rate=5, gui_config: dict = None,
             "loudness_burst_points",
             config.get("scoring", {}).get("loudness_burst_points", 0))
         loudness_bursts = []
+        loudness_ok = True
         # Per-second dBFS, kept because the report compares the level measured
         # during each labelled class and that needs a value for every second,
         # not only the ones that stood out. See modules/audio/level_by_class.py.
@@ -1083,12 +1143,14 @@ def run_highlighter(video_path, sample_rate=5, gui_config: dict = None,
         if LOUDNESS_BURST_POINTS:
             _cached_blob = cached_data if "cached_data" in locals() else None
             _cached_bursts = None
-            if using_cache and isinstance(_cached_blob, dict):
+            if audio_resume:
+                _cached_blob = {"audio": completed_stages["audio"]}
+            if (using_cache or audio_resume) and isinstance(_cached_blob, dict):
                 _audio_blob = _cached_blob.get("audio")
                 if isinstance(_audio_blob, dict):
                     _cached_bursts = _audio_blob.get("loudness_bursts")
                     loudness_levels = _audio_blob.get("loudness_levels") or []
-            if _cached_bursts:
+            if _cached_bursts is not None:
                 loudness_bursts = _cached_bursts
                 log(f"ℹ️ Using cached loudness bursts "
                     f"({len(loudness_bursts)} event(s))")
@@ -1123,6 +1185,20 @@ def run_highlighter(video_path, sample_rate=5, gui_config: dict = None,
                 except Exception as e:
                     log(f"⚠️ Loudness burst detection failed: {e}")
                     loudness_bursts = []
+                    loudness_ok = False
+
+        if (stage_cache and not using_cache and not audio_resume
+                and loudness_ok and not (cancel_flag and cancel_flag.is_set())):
+            try:
+                stage_cache.save_stage(processed_video_path, analysis_params,
+                                       "audio", {"peaks": audio_peaks,
+                                                 "waveform": waveform_data,
+                                                 "loudness_bursts": loudness_bursts,
+                                                 "loudness_levels": loudness_levels,
+                                                 "peaks_computed": bool(effective_points["audio_peak_points"]),
+                                                 "loudness_computed": loudness_requested})
+            except Exception as exc:
+                log(f"⚠️ No se pudo guardar el audio: {exc}")
 
         # Keep what the backfills just cost, so this is a one-off rather than a
         # tax on every future run. Only the backfilled keys are replaced, in the
@@ -1230,6 +1306,7 @@ def run_highlighter(video_path, sample_rate=5, gui_config: dict = None,
         # --- Object detection ---
         object_bboxes_cache = []  # default so cache save never NameErrors when objects are skipped
         composed_event_names = []  # same reason: set only when the engine runs
+        object_resume = not using_cache and "objects" in completed_stages
         if using_cache:
             # Which events the *cached* detections already carry. The engine
             # re-runs below either way; this is what tells it what to strip
@@ -1247,7 +1324,13 @@ def run_highlighter(video_path, sample_rate=5, gui_config: dict = None,
                 log(f"ℹ Reusing {len(object_bboxes_cache)} cached detection "
                     "frame(s) for the report")
         if not using_cache:
-            if not highlight_objects:
+            if object_resume:
+                saved = completed_stages["objects"]
+                object_detections = {float(k): v for k, v in
+                                     saved.get("detections", {}).items()}
+                object_bboxes_cache = saved.get("bboxes", [])
+                log("ℹ️ Se reutilizó la detección de objetos terminada")
+            elif not highlight_objects:
                 log("ℹ Skipping object detection (no objects to highlight)")
                 object_detections = {}
             else:
@@ -1283,6 +1366,13 @@ def run_highlighter(video_path, sample_rate=5, gui_config: dict = None,
                     object_bboxes_cache += std_bb
 
                 log(f"✅ Object detection complete: {len(object_detections)} seconds with objects")
+                if yolo_model is not None and stage_cache and not (cancel_flag and cancel_flag.is_set()):
+                    try:
+                        stage_cache.save_stage(processed_video_path, analysis_params,
+                                               "objects", {"detections": object_detections,
+                                                           "bboxes": object_bboxes_cache})
+                    except Exception as exc:
+                        log(f"⚠️ No se pudieron guardar los objetos: {exc}")
 
         else:
             log(CACHE_HIT_LOG.format(kind="object"))
@@ -1406,8 +1496,17 @@ def run_highlighter(video_path, sample_rate=5, gui_config: dict = None,
         interesting_actions = gui_config.get("interesting_actions", [])
         action_bboxes_cache = []
         all_action_detections = []  # full raw detection stream (for the timeline "show all")
+        action_resume = (not using_cache and bool(interesting_actions)
+                         and "actions" in completed_stages)
+        if action_resume:
+            saved = completed_stages["actions"]
+            action_detections = saved.get("selected", [])
+            all_action_detections = saved.get("all", [])
+            action_bboxes_cache = saved.get("bboxes", [])
+            log("ℹ️ Se reutilizó el reconocimiento de acciones terminado")
 
-        if not using_cache and interesting_actions:
+        if not using_cache and interesting_actions and not action_resume:
+            action_ok = False
             try:
                 # Get action label settings
                 draw_action_labels = gui_config.get("draw_action_labels", False)
@@ -1663,11 +1762,23 @@ def run_highlighter(video_path, sample_rate=5, gui_config: dict = None,
                     action_detections = sorted(action_detections, key=lambda x: x[0])
                     log(f"✅ Action recognition: {len(action_detections)} action sequences selected (total duration: {total_duration:.1f}s)")
 
+                action_ok = True
+
             except Exception as e:
                 log(f"⚠ Action recognition failed: {e}")
                 import traceback
                 log(f"Full error: {traceback.format_exc()}")
                 action_detections = []
+            if action_ok and stage_cache and not (cancel_flag and cancel_flag.is_set()):
+                try:
+                    stage_cache.save_stage(processed_video_path, analysis_params,
+                                           "actions", {"selected": action_detections,
+                                                       "all": all_action_detections,
+                                                       "bboxes": action_bboxes_cache})
+                except Exception as exc:
+                    log(f"⚠️ No se pudieron guardar las acciones: {exc}")
+        elif action_resume:
+            pass
         elif using_cache:
             log(CACHE_HIT_LOG.format(kind="action"))
             # action_detections already loaded from cache - ensure it's in 5-element format
@@ -1721,6 +1832,8 @@ def run_highlighter(video_path, sample_rate=5, gui_config: dict = None,
                 # Save to cache with signature-based naming
                 cache = VideoAnalysisCache(cache_dir=gui_config.get("cache_dir", "./cache"))
                 cache.save(processed_video_path, analysis_data, params=analysis_params)
+                if stage_cache is not None:
+                    stage_cache.clear_stages(processed_video_path, analysis_params)
                 
                 if keyword_segments_only:
                     log(f"✅ Analysis results cached (keyword-filtered: {len(analysis_data['transcript']['segments'])} segments, language: {TRANSCRIPT_SOURCE_LANG})")
@@ -2662,10 +2775,15 @@ def run_highlighter(video_path, sample_rate=5, gui_config: dict = None,
             return segments
 
         # Cut and concatenate
+        analysis_seconds = time.time() - pipeline_started_at
+        log(f"⏱️ Tiempo de análisis: {analysis_seconds:.1f} s")
+        export_started_at = time.time()
         progress.update_progress(90, 100, "Pipeline", "Creating highlight video...")
         _render_mode_label = {"cpu": "CPU re-encode (libx265/264)",
-                              "gpu": "GPU re-encode"}[RENDER_MODE]
+                              "gpu": "GPU automático", "auto": "Automático",
+                              "nvenc": "NVIDIA NVENC"}[RENDER_MODE]
         log(f"🔹 Step 7: Cutting video segments... [{_render_mode_label}]")
+        used_encoders = set()
         try:
             from modules.media.clip_export import (
                 clips_directory, sanitize_base_name, segment_clip_path,
@@ -2677,9 +2795,11 @@ def run_highlighter(video_path, sample_rate=5, gui_config: dict = None,
                 log("⚠️ No segments selected — nothing to cut.")
             elif len(segments) == 1 and not EXPORT_CLIPS:
                 check_cancellation(cancel_flag, log, "video cutting")
-                cut_video(
+                encoder_used = cut_video(
                     processed_video_path, segments[0][0], segments[0][1],
                     OUTPUT_FILE, mode=RENDER_MODE)
+                if encoder_used:
+                    used_encoders.add(encoder_used)
             else:
                 output_dir = os.path.dirname(OUTPUT_FILE) or "."
                 video_base_name = sanitize_base_name(
@@ -2700,7 +2820,9 @@ def run_highlighter(video_path, sample_rate=5, gui_config: dict = None,
                         clip_path = os.path.join(
                             output_dir, f"{video_base_name}_temp_clip_{i}.mp4")
                     log(f"  Creating clip: {clip_path}")
-                    cut_video(processed_video_path, s, e, clip_path, mode=RENDER_MODE)
+                    encoder_used = cut_video(processed_video_path, s, e, clip_path, mode=RENDER_MODE)
+                    if encoder_used:
+                        used_encoders.add(encoder_used)
                     if not os.path.exists(clip_path):
                         raise Exception(f"Failed to create clip: {clip_path}")
                     clip_paths.append(clip_path)
@@ -2750,6 +2872,10 @@ def run_highlighter(video_path, sample_rate=5, gui_config: dict = None,
 
                 if EXPORT_CLIPS and clips_dir:
                     log(f"✅ {len(clip_paths)} separate clip(s) in {clips_dir}")
+            if used_encoders:
+                encoder_names = ", ".join(sorted(used_encoders))
+                encoder_type = "NVIDIA NVENC" if all("nvenc" in name for name in used_encoders) else "CPU" if all(name.startswith("libx") for name in used_encoders) else "Mixto"
+                log(f"Codificador utilizado: {encoder_type} ({encoder_names})")
             # Nothing was cut when no segment survived selection: neither the
             # success line nor the music bed may fire, or a run that produced
             # no file still reports one (and would mux music onto a stale
@@ -2787,6 +2913,20 @@ def run_highlighter(video_path, sample_rate=5, gui_config: dict = None,
         except Exception as e:
             log(f"⚠️ Error during cutting/concatenation: {e}")
             raise
+
+        log(f"⏱️ Tiempo de exportación: {time.time() - export_started_at:.1f} s")
+        try:
+            import psutil
+            ram_mb = psutil.Process().memory_info().rss / (1024 * 1024)
+            log(f"📊 RAM del proceso: {ram_mb:.0f} MiB")
+        except ImportError:
+            pass
+        try:
+            if torch.cuda.is_available():
+                peak_vram_mb = torch.cuda.max_memory_allocated(0) / (1024 * 1024)
+                log(f"📊 Pico de VRAM PyTorch: {peak_vram_mb:.0f} MiB")
+        except Exception:
+            pass
 
         # Create matching subtitles for highlight video OR full video
         if CREATE_SUBTITLES and USE_TRANSCRIPT and transcript_segments:

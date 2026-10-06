@@ -60,6 +60,9 @@ def build_analysis_cache_params(gui_config: dict, config: dict, sample_rate: int
         # action detector knobs used in your call
         "action_use_person_detection": True,
         "action_max_people": int(gui_config.get("action_max_people", 2) or 2),
+        "action_backend": str(gui_config.get("action_backend", "auto")),
+        "action_models": str(gui_config.get("action_models", "mixed")),
+        "r3d_model": str(gui_config.get("r3d_model", "r3d_18")),
 
         # detector identity — "object_detector" changed from the earlier
         # detector, so detections cached by it are recomputed, not reused
@@ -67,6 +70,8 @@ def build_analysis_cache_params(gui_config: dict, config: dict, sample_rate: int
         "yolo_model_size": yolo_model_size,
         "yolo_type": yolo_type,
         "yolo_custom_model_path": str(custom_model_path) if "custom" in yolo_type else "",
+        "object_confidence": float(gui_config.get("object_confidence", 0.3)),
+        "frame_skip": int(gui_config.get("frame_skip", 5)),
 
         # time-range
         "use_time_range": use_time_range,
@@ -326,6 +331,47 @@ class VideoAnalysisCache:
     def _get_cache_path(self, video_path: str) -> Path:
         video_hash = self._get_video_hash(video_path)
         return self.cache_dir / f"{video_hash}.cache.json"
+
+    def _stage_path(self, video_path: str, params: Dict[str, Any]) -> Path:
+        return self.cache_dir / "temp" / (
+            f"{self._get_video_hash(video_path)}.{self._make_signature(params)}.stages.json")
+
+    def load_stages(self, video_path: str, params: Dict[str, Any]) -> dict:
+        """Return only completed checkpoints for this file and analysis signature."""
+        path = self._stage_path(video_path, params)
+        try:
+            with open(path, encoding="utf-8") as handle:
+                data = json.load(handle)
+            if (data.get("video_hash") == self._get_video_hash(video_path)
+                    and data.get("analysis_signature") == self._make_signature(params)):
+                return data.get("stages", {}) or {}
+        except (OSError, ValueError, TypeError):
+            pass
+        return {}
+
+    def save_stage(self, video_path: str, params: Dict[str, Any],
+                   name: str, payload: dict) -> None:
+        """Atomically record one fully finished stage; never mark a running one."""
+        with self._lock:
+            stages = self.load_stages(video_path, params)
+            stages[name] = payload
+            atomic_write_json(self._stage_path(video_path, params), {
+                "video_hash": self._get_video_hash(video_path),
+                "analysis_signature": self._make_signature(params),
+                "stages": stages,
+            })
+
+    def restart_analysis(self, video_path: str, params: Dict[str, Any]) -> None:
+        """Discard exactly this video's current-signature analysis and stages."""
+        with self._lock:
+            self._stage_path(video_path, params).unlink(missing_ok=True)
+            signature = self._make_signature(params)
+            self._get_analysis_cache_path_for_signature(
+                video_path, signature).unlink(missing_ok=True)
+
+    def clear_stages(self, video_path: str, params: Dict[str, Any]) -> None:
+        with self._lock:
+            self._stage_path(video_path, params).unlink(missing_ok=True)
 
     def _get_parameters_hash(self, parameters: Dict[str, Any]) -> str:
         # ensure stable hash

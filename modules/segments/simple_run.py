@@ -49,6 +49,37 @@ def apply_simple_run(config: dict, length: str = "medium") -> dict:
     return config
 
 
+def apply_gaming_run(config: dict, minutes: int = 10) -> dict:
+    """Tune existing signals for long gameplay without requiring speech.
+
+    Objects and actions only score when the user configured their real classes.
+    The same local detectors, selection, cache and export path remain in use.
+    """
+    minutes = max(1, min(180, int(minutes)))
+    config.update({
+        "scene_points": 2,
+        "motion_event_points": 4,
+        "motion_peak_points": 5,
+        "audio_peak_points": 2,
+        "loudness_burst_points": 3,
+        "keyword_points": 0,
+        "transcript_points": 0,
+        "beginning_points": 0,
+        "ending_points": 0,
+        "object_points": 3 if config.get("highlight_objects") else 0,
+        "action_points": 4 if config.get("interesting_actions") else 0,
+        "use_transcript": False,
+        "create_subtitles": False,
+        "max_duration": minutes * 60,
+        "exact_duration": None,
+        "clip_time": 12,
+        "coverage": 0.15,
+        "export_separate_clips": True,
+        "write_highlight_report": True,
+    })
+    return config
+
+
 VIDEO_SUFFIXES = {".mp4", ".mov", ".avi", ".mkv", ".webm", ".m4v"}
 
 

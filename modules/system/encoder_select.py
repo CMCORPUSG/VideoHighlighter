@@ -157,8 +157,9 @@ def encoder_chain(video_path, ffmpeg=None, mode="gpu"):
     always ending with a CPU fallback. Cached per (video path, mode).
 
     `mode`:
-      - "gpu" (default): hardware first (nvenc/qsv/amf), CPU libx264 fallback.
+      - "auto" / legacy "gpu": hardware first (nvenc/qsv/amf), CPU fallback.
         Fast, but the hardware HEVC bitstreams are rejected by some VR players.
+      - "nvenc": NVIDIA hardware first, then CPU if unavailable at runtime.
       - "cpu": CPU only — libx265 for high-res/VR (matches how VR sources are
         authored, so VR players accept it), libx264 otherwise. Slow but safe.
 
@@ -167,6 +168,9 @@ def encoder_chain(video_path, ffmpeg=None, mode="gpu"):
     is kept (+ libx264); when unknown (CPU-only, or an AMD box with no
     DirectML installed to name the card) the full candidate list is kept so
     h264_amf/hevc_amf still gets a chance."""
+    # "gpu" is the legacy name for automatic hardware selection.
+    if mode not in ("gpu", "auto", "nvenc", "cpu"):
+        mode = "auto"
     cache_key = (video_path, mode)
     if cache_key in _chain_cache:
         return _chain_cache[cache_key]
@@ -200,7 +204,9 @@ def encoder_chain(video_path, ffmpeg=None, mode="gpu"):
         ]
     present = [(n, a) for (n, a) in candidates if n in text]
     vendor = preferred_gpu_vendor()
-    if vendor:
+    if mode == "nvenc":
+        present = [it for it in present if "nvenc" in it[0]]
+    elif vendor:
         key = {"nvidia": "nvenc", "intel": "qsv", "amd": "amf"}[vendor]
         present = [it for it in present if key in it[0]]
     chain = present + [_LIBX264]

@@ -1727,7 +1727,9 @@ class LLMChatWidget(QWidget):
         t_data = self._analysis_data.get("transcript", {})
         n_trans = len(t_data.get("segments", [])) if isinstance(t_data, dict) else 0
 
-        vname = os.path.basename(self._video_path) if self._video_path else "loaded"
+        full_vname = os.path.basename(self._video_path) if self._video_path else "cargado"
+        vname = full_vname if len(full_vname) <= 36 else full_vname[:33] + "…"
+        self.context_label.setToolTip(full_vname)
 
         analyzer_status = " | Analyzer: ready" if self._analyzer else ""
 
@@ -1826,7 +1828,7 @@ class LLMChatWidget(QWidget):
         self.refresh_btn.setVisible(backend == "ollama")
         self.model_combo.setEnabled(backend in ("ollama", "gemini"))
         self.connect_btn.setEnabled(backend != "none")
-        self._search_section.setVisible(backend != "gemini")
+        self._search_section.setVisible(backend not in ("gemini", "none"))
 
         if is_gguf:
             self._populate_recent_gguf()

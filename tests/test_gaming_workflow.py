@@ -1,5 +1,5 @@
 from modules.segments.simple_run import apply_gaming_run
-from modules.media.video_cache import VideoAnalysisCache
+from modules.media.video_cache import VideoAnalysisCache, build_analysis_cache_params
 from modules.system import encoder_select
 
 
@@ -27,6 +27,16 @@ def test_stage_checkpoint_requires_same_video_and_parameters(tmp_path):
     assert cache.load_stages(str(video), {**params, "sample_rate": 8}) == {}
     video.write_bytes(b"second video, longer")
     assert cache.load_stages(str(video), params) == {}
+
+
+def test_analysis_signature_tracks_detector_backend():
+    base = {"interesting_actions": ["victory"], "action_backend": "auto",
+            "object_confidence": 0.3}
+    first = build_analysis_cache_params(base, {}, 5, 3600)
+    second = build_analysis_cache_params({**base, "action_backend": "r3d_cpu"}, {}, 5, 3600)
+    third = build_analysis_cache_params({**base, "object_confidence": 0.6}, {}, 5, 3600)
+    assert first != second
+    assert first != third
 
 
 def test_nvenc_mode_only_attempts_nvidia_then_cpu(monkeypatch):

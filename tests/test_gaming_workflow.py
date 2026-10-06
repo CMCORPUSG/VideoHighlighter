@@ -49,21 +49,28 @@ def test_nvenc_mode_only_attempts_nvidia_then_cpu(monkeypatch):
 
 
 def test_ui_translation_keeps_combo_data_and_can_switch_back():
+    from PySide6.QtGui import QAction
     from PySide6.QtWidgets import QApplication, QComboBox, QPushButton, QWidget
     from modules.ui.i18n import translate_tree
     app = QApplication.instance() or QApplication([])
     parent = QWidget()
     button = QPushButton("Analyze", parent)
+    button.setToolTip("Click a face to find all segments where they appear.")
     combo = QComboBox(parent)
     combo.addItem("Full video", "full")
+    action = QAction("Export", parent)
     translate_tree(parent, "es")
     assert button.text() == "Analizar"
+    assert button.toolTip().startswith("Haz clic en un rostro")
     assert combo.itemText(0) == "Video completo"
     assert combo.itemData(0) == "full"
+    assert action.text() == "Exportar"
     translate_tree(parent, "en")
     assert button.text() == "Analyze"
+    assert button.toolTip().startswith("Click a face")
     assert combo.itemText(0) == "Full video"
     assert combo.itemData(0) == "full"
+    assert action.text() == "Export"
 
 
 def test_gemini_sends_only_bounded_text_context(monkeypatch):

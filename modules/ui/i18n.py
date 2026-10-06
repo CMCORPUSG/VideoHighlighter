@@ -7,11 +7,78 @@ from __future__ import annotations
 
 import re
 
+from PySide6.QtGui import QAction
 from PySide6.QtWidgets import (QAbstractButton, QComboBox, QGroupBox, QLabel,
                                QLineEdit, QTabWidget, QTextEdit, QWidget)
 
 
 ES = {
+    "+ Add All to Edit Timeline": "+ Agregar todo a la línea de tiempo",
+    "+ Edit": "+ Editar",
+    "<b>Add a model</b>": "<b>Agregar un modelo</b>",
+    "Add Clip": "Agregar clip",
+    "Add to the list": "Agregar a la lista",
+    "Adjust minimum confidence separately for actions and objects.": "Ajusta por separado la confianza mínima de acciones y objetos.",
+    "All actions/objects visible": "Todas las acciones y objetos visibles",
+    "Avoid selected range": "Excluir el rango seleccionado",
+    "Choose...": "Elegir...",
+    "Click a face to find all segments where they appear.": "Haz clic en un rostro para encontrar los segmentos en los que aparece.",
+    "Clips folder:": "Carpeta de clips:",
+    "Cut Mode": "Modo de corte",
+    "Derived from your composition rules, not detected directly.": "Derivado de las reglas de composición; no se detecta directamente.",
+    "Download selected": "Descargar seleccionados",
+    "Edit duration: 0.0s": "Duración editada: 0,0 s",
+    "Examples:": "Ejemplos:",
+    "Export": "Exportar",
+    "Filter Actions": "Filtrar acciones",
+    "Filter Composed Events": "Filtrar eventos compuestos",
+    "Filter Objects": "Filtrar objetos",
+    "Filter by Confidence Level": "Filtrar por confianza",
+    "Follow Playhead": "Seguir el cabezal de reproducción",
+    "Gap:": "Separación:",
+    "Hide All": "Ocultar todo",
+    "Import from labeller...": "Importar desde el etiquetador...",
+    "Language:": "Idioma:",
+    "Merge nearby signals into continuous blocks": "Unir señales cercanas en bloques continuos",
+    "No detections": "Sin detecciones",
+    "No segments to show.": "No hay segmentos para mostrar.",
+    "No tagged identities found.\nRun identity tagging first.": "No se encontraron identidades etiquetadas.\nPrimero ejecuta el etiquetado de personas.",
+    "No time selected": "No hay un tiempo seleccionado",
+    "No transcript available.\nRun the pipeline with transcript enabled.": "No hay transcripción.\nEjecuta el análisis con la transcripción activada.",
+    "Off": "Desactivado",
+    "Overlay:": "Superposición:",
+    "Play Edit": "Reproducir edición",
+    "Remove selected": "Quitar seleccionados",
+    "Render Highlight Video": "Exportar video resumen",
+    "Runs one pass on this video and folds it into the cache. Advanced settings live in the main window.": "Ejecuta un análisis de este video y guarda el resultado en caché. Los ajustes avanzados están en la ventana principal.",
+    "Scan expressions": "Detectar expresiones",
+    "Select All": "Seleccionar todo",
+    "Select a person above": "Selecciona una persona arriba",
+    "Select all": "Seleccionar todo",
+    "Select cached highlight version:": "Seleccionar versión guardada del resumen:",
+    "Select export format:": "Seleccionar formato de exportación:",
+    "Select none": "Quitar selección",
+    "Sensitivity:": "Sensibilidad:",
+    "Sequence start:": "Inicio de secuencia:",
+    "Show AI Labels Overlay": "Mostrar etiquetas de IA",
+    "Show All": "Mostrar todo",
+    "Show Detections": "Mostrar detecciones",
+    "Show only highlight actions": "Mostrar solo acciones seleccionadas",
+    "Show:": "Mostrar:",
+    "Speed:": "Velocidad:",
+    "Sync with Timeline": "Sincronizar con la línea de tiempo",
+    "Teach the app to recognise something that happens over time, rather than something visible in a single frame.\nGive it one folder per action, with a few short clips inside each.": "Enseña a la aplicación a reconocer acciones que ocurren a lo largo del tiempo.\nCrea una carpeta por acción con varios clips cortos.",
+    "The report can be written with any of these. The one selected is used until you pick another.": "El reporte puede generarse con cualquiera de estos modelos. Se usará el seleccionado hasta que elijas otro.",
+    "Train a model": "Entrenar un modelo",
+    "Train an action model": "Entrenar un modelo de acciones",
+    "VR Half-Frame": "Medio fotograma VR",
+    "Volume:": "Volumen:",
+    "Window:": "Ventana:",
+    "none chosen": "Ninguno seleccionado",
+    "All (0%)": "Todos (0 %)",
+    "High (70%)": "Alta (70 %)",
+    "Medium (40%)": "Media (40 %)",
+    "Low (10%)": "Baja (10 %)",
     "0/0": "0/0",
     "Duration: 300s (5:00)": "Duración: 300 s (5:00)",
     "Engine:": "Motor:",
@@ -250,6 +317,14 @@ def _translate(value: str, language: str) -> str:
 def translate_tree(root: QWidget, language: str) -> None:
     """Translate cataloged widget text; preserve source text for switching back."""
     for widget in [root, *root.findChildren(QWidget)]:
+        tooltip = widget.toolTip()
+        source_tooltip = widget.property("i18n_tooltip_source")
+        if source_tooltip is None or tooltip != widget.property("i18n_tooltip_last"):
+            source_tooltip = tooltip
+            widget.setProperty("i18n_tooltip_source", source_tooltip)
+        translated_tooltip = _translate(source_tooltip, language)
+        widget.setToolTip(translated_tooltip)
+        widget.setProperty("i18n_tooltip_last", translated_tooltip)
         if isinstance(widget, QTabWidget):
             for i in range(widget.count()):
                 page = widget.widget(i)
@@ -286,3 +361,12 @@ def translate_tree(root: QWidget, language: str) -> None:
             translated = _translate(source, language)
             widget.setPlaceholderText(translated)
             widget.setProperty("i18n_placeholder_last", translated)
+    for action in root.findChildren(QAction):
+        source = action.property("i18n_source")
+        current = action.text()
+        if source is None or current != action.property("i18n_last"):
+            source = current
+            action.setProperty("i18n_source", source)
+        translated = _translate(source, language)
+        action.setText(translated)
+        action.setProperty("i18n_last", translated)

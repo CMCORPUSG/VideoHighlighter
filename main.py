@@ -3400,6 +3400,12 @@ class VideoHighlighterGUI(QWidget):
     def _change_language(self):
         self.ui_language = self.language_combo.currentData()
         translate_tree(self, self.ui_language)
+        timeline = getattr(self, "timeline_window", None)
+        if timeline is not None:
+            try:
+                translate_tree(timeline, self.ui_language)
+            except RuntimeError:
+                self.timeline_window = None
 
     def resizeEvent(self, event):
         """Record where a resize settled.
@@ -4047,6 +4053,7 @@ class VideoHighlighterGUI(QWidget):
             self.append_log(f"❌ Video picker unavailable: {e}")
             return
         dlg = VideoPickerDialog(url, pattern="auto", use_browser="auto", parent=self)
+        translate_tree(dlg, self.ui_language)
         if dlg.exec():
             urls = [e["url"] for e in dlg.selected_entries()]
             if not urls:
@@ -6625,6 +6632,7 @@ class VideoHighlighterGUI(QWidget):
             from signal_timeline_viewer import SignalTimelineWindow
             self.append_log(f"📊 Opening timeline viewer for: {os.path.basename(video_path)}")
             self.timeline_window = SignalTimelineWindow(video_path, analysis_data)
+            translate_tree(self.timeline_window, self.ui_language)
             self.timeline_window.show()
             self.llm_chat.set_timeline_window(self.timeline_window)
             self.llm_chat.set_video_path(video_path)
@@ -7391,6 +7399,7 @@ class VideoHighlighterGUI(QWidget):
             try:
                 # Create and show the timeline window
                 window = SignalTimelineWindow(video_path, cache_data)
+                translate_tree(window, self.ui_language)
                 # An Analyze run started over there detects over the whole
                 # video just as a pipeline stage does, so it feeds the preview
                 # window this side owns. Queued (the frames come off the

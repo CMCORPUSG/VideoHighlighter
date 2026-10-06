@@ -1787,11 +1787,18 @@ class VideoHighlighterGUI(QWidget):
             "Above 0, the highlight is this many seconds — low-scoring seconds "
             "are used to fill it. 0 leaves max duration in charge, and the cut "
             "can be shorter.")
+        self.segment_mode_combo = QComboBox()
+        self.segment_mode_combo.addItem("Complete events", "events")
+        self.segment_mode_combo.addItem("Fixed windows (legacy)", "fixed")
+        self.segment_mode_combo.addItem("Legacy auto segments", "legacy_auto")
+        saved_mode = highlights_cfg.get("segmentation_mode", "events")
+        self.segment_mode_combo.setCurrentIndex(max(0, self.segment_mode_combo.findData(saved_mode)))
         self.spin_clip_time = QSpinBox(); self.spin_clip_time.setRange(0,300); self.spin_clip_time.setValue(highlights_cfg.get("clip_time", 10))
         self.spin_clip_time.setToolTip(
             "Length of each fixed window, in seconds, around a scored second. "
             "0 uses auto-segmentation (min/max clip and merge gap below).")
 
+        duration_form.addRow("Segment mode:", self.segment_mode_combo)
         duration_form.addRow("Max highlight duration (s):", self.spin_max_duration)
         duration_form.addRow("Exact duration (s, 0 = off):", self.spin_exact_duration)
         duration_form.addRow("Clip time (s, 0 = auto):", self.spin_clip_time)
@@ -1878,19 +1885,29 @@ class VideoHighlighterGUI(QWidget):
 
         # ── Connect clip_time spinner to show/hide auto-seg controls ──
         def on_clip_time_changed(value):
-            is_auto = (value == 0)
-            self.auto_seg_group.setVisible(is_auto)
-            if is_auto:
+            mode = self.segment_mode_combo.currentData()
+            self.auto_seg_group.setVisible(mode == "legacy_auto")
+            self.spin_clip_time.setVisible(mode == "fixed")
+            duration_form.labelForField(self.spin_clip_time).setVisible(mode == "fixed")
+            self.spin_exact_duration.setVisible(mode != "events")
+            duration_form.labelForField(self.spin_exact_duration).setVisible(mode != "events")
+            if mode == "events":
                 self.auto_seg_info_label.setText(
-                    "🔧 Auto mode: the app will determine clip boundaries from signal structure "
-                    "(action durations, scene cuts, keyword timing, object clusters, audio/motion peaks)."
+                    "🎮 Complete events: clips have variable length, with context before and after. "
+                    "The highlight duration is an approximate target; events are not cut to fill it.")
+            elif mode == "legacy_auto":
+                self.auto_seg_info_label.setText(
+                    "🔧 Legacy auto mode: uses the minimum, maximum and merge settings below."
                 )
             else:
                 self.auto_seg_info_label.setText(
                     f"✂️ Fixed mode: each highlight clip will be {value}s long."
                 )
+            translate_tree(self.auto_seg_info_label, self.ui_language)
 
         self.spin_clip_time.valueChanged.connect(on_clip_time_changed)
+        self.segment_mode_combo.currentIndexChanged.connect(
+            lambda _: on_clip_time_changed(self.spin_clip_time.value()))
         # Trigger once to set initial state
         on_clip_time_changed(self.spin_clip_time.value())
 
@@ -4357,6 +4374,7 @@ class VideoHighlighterGUI(QWidget):
             "face_expression_points": int(self.spin_face_expression.value()),
             "face_expression_labels": self.selected_face_labels(),
             "clip_time": int(self.spin_clip_time.value()),
+            "segmentation_mode": self.segment_mode_combo.currentData(),
             "coverage": self.slider_coverage.value() / 100.0,
             "report_only": bool(getattr(self, "_report_only", False)),
             "max_duration": int(self.spin_max_duration.value()),
@@ -4727,6 +4745,8 @@ class VideoHighlighterGUI(QWidget):
 
         if has("highlights", "output"):
             self.output_input.setText(str(get("highlights", "output") or ""))
+        if has("highlights", "segmentation_mode"):
+            self._set_combo_data(self.segment_mode_combo, get("highlights", "segmentation_mode"))
         for key, spin in (
             ("clip_time", self.spin_clip_time),
             ("max_duration", self.spin_max_duration),
@@ -4933,6 +4953,7 @@ class VideoHighlighterGUI(QWidget):
             },
             "highlights": {
                 "clip_time": int(self.spin_clip_time.value()),
+                "segmentation_mode": self.segment_mode_combo.currentData(),
                 "coverage": self.slider_coverage.value() / 100.0,
                 "output": self.output_input.text().strip(),
                 "max_duration": int(self.spin_max_duration.value()),
@@ -5844,6 +5865,7 @@ class VideoHighlighterGUI(QWidget):
             "face_expression_points": int(self.spin_face_expression.value()),
             "face_expression_labels": self.selected_face_labels(),
             "clip_time": int(self.spin_clip_time.value()),
+            "segmentation_mode": self.segment_mode_combo.currentData(),
             "coverage": self.slider_coverage.value() / 100.0,
             "report_only": bool(getattr(self, "_report_only", False)),
             "max_duration": int(self.spin_max_duration.value()),

@@ -13,6 +13,12 @@ from PySide6.QtWidgets import (QAbstractButton, QComboBox, QGroupBox, QLabel,
 
 
 ES = {
+    "Segment mode:": "Tipo de segmento:",
+    "Complete events": "Eventos completos",
+    "Fixed windows (legacy)": "Ventanas fijas (anterior)",
+    "Legacy auto segments": "Segmentos automáticos (anteriores)",
+    "🎮 Complete events: clips have variable length, with context before and after. The highlight duration is an approximate target; events are not cut to fill it.": "🎮 Eventos completos: los clips tienen duración variable y contexto antes y después. La duración del resumen es aproximada; los eventos no se recortan para completarla.",
+    "🔧 Legacy auto mode: uses the minimum, maximum and merge settings below.": "🔧 Modo automático anterior: usa los ajustes de duración mínima, máxima y unión que aparecen abajo.",
     "Idioma / Language:": "Idioma:",
     "inside: its centre is in the region\noverlaps: most of its area is in the region\ntouches: the two meet": "dentro: su centro está en la región\nsuperpuesto: la mayor parte de su área está en la región\ntoca: ambos se encuentran",
     "Start at 00:00:00:00": "Iniciar en 00:00:00:00",
@@ -416,6 +422,9 @@ def _translate(value: str, language: str) -> str:
         return f"{match.group(1)} videos listos · haz clic en Analizar"
     if value == "1 video ready — press Analyze":
         return "1 video listo · haz clic en Analizar"
+    match = re.fullmatch(r"✂️ Fixed mode: each highlight clip will be (\d+)s long\.", value)
+    if match:
+        return f"✂️ Modo fijo: cada clip durará {match.group(1)} s."
     return value
 
 

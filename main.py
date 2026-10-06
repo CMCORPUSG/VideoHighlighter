@@ -54,6 +54,7 @@ import json
 import subprocess
 import threading
 import time
+from pathlib import Path
 import yaml
 import multiprocessing
 
@@ -73,10 +74,11 @@ from llm.llm_chat_widget import LLMChatWidget
 from modules.media.video_cache import VideoAnalysisCache, CachedAnalysisData, build_analysis_cache_params
 from modules.report import analysis_stats
 from modules.ui import icons as _ui_icons, theme as _ui_theme
-from modules.segments.simple_run import apply_simple_run
+from modules.segments.simple_run import apply_simple_run, apply_gaming_run
 from modules.ui.simple_start import (
     SimpleStartPage, persist_simple_start, simple_start_enabled,
 )
+from modules.ui.i18n import translate_tree
 # The five classes the expression scan can report. Imported for the Basic
 # tab's picker; the module itself loads no model until something asks it to scan.
 from modules.vision.face_emotions import EMOTION_LABELS
@@ -1046,8 +1048,13 @@ class VideoHighlighterGUI(QWidget):
         self._size_log_timer.timeout.connect(self._log_size)
 
         self.worker = None
+        self._last_encoder = "No registrado"
+        self._last_output_file = ""
+        self._analysis_seconds = None
+        self._export_seconds = None
 
         self.config_data = self.load_config()
+        self.ui_language = self.config_data.get("ui", {}).get("language", "es")
 
         # Publish the saved DirectML choice into the environment before anything
         # probes a device, so worker processes — which inherit the environment
@@ -1072,6 +1079,17 @@ class VideoHighlighterGUI(QWidget):
         # does; see modules/ui/pro_offer.py for when that is) ---
         self.pro_banner = self._build_pro_banner()
         root.addWidget(self.pro_banner)
+
+        language_row = QHBoxLayout()
+        language_row.addStretch()
+        language_row.addWidget(QLabel("Idioma / Language:"))
+        self.language_combo = QComboBox()
+        self.language_combo.addItem("Español (Latinoamérica)", "es")
+        self.language_combo.addItem("English", "en")
+        self.language_combo.setCurrentIndex(0 if self.ui_language == "es" else 1)
+        self.language_combo.currentIndexChanged.connect(self._change_language)
+        language_row.addWidget(self.language_combo)
+        root.addLayout(language_row)
 
         self.view_stack = QStackedWidget()
         root.addWidget(self.view_stack, 1)
@@ -3006,16 +3024,16 @@ class VideoHighlighterGUI(QWidget):
         output_box = QGroupBox("Video Output")
         output_layout = QFormLayout()
         self.render_mode_combo = QComboBox()
-        self.render_mode_combo.addItem("CPU x265 (VR-safe, slow)", "cpu")
-        self.render_mode_combo.addItem("GPU (fast, may break VR)", "gpu")
+        self.render_mode_combo.addItem("Automático (GPU si está disponible)", "auto")
+        self.render_mode_combo.addItem("NVIDIA NVENC", "nvenc")
+        self.render_mode_combo.addItem("CPU (compatible con VR)", "cpu")
         self.render_mode_combo.setToolTip(
-            "How the highlight video is encoded:\n"
-            "CPU x265 — re-encode on the CPU with libx265 (HEVC), matching how VR\n"
-            "   sources are authored. VR-safe, but slow at 6K.\n"
-            "GPU — re-encode with the hardware encoder. Fast, but the HEVC output\n"
-            "   may not play in VR players like HereSphere."
+            "Automático: intenta un codificador de GPU compatible y usa CPU si falla.\n"
+            "NVIDIA NVENC: intenta H.264 NVENC (HEVC para VR de alta resolución)\n"
+            "y usa CPU si el codificador no está disponible.\n"
+            "CPU: usa libx264 o libx265 para material VR de alta resolución."
         )
-        _saved_render_mode = highlights_cfg.get("render_mode", "cpu")
+        _saved_render_mode = highlights_cfg.get("render_mode", "auto")
         _rm_idx = self.render_mode_combo.findData(_saved_render_mode)
         if _rm_idx >= 0:
             self.render_mode_combo.setCurrentIndex(_rm_idx)
@@ -3377,6 +3395,11 @@ class VideoHighlighterGUI(QWidget):
         pidx = self.process_mode_combo.findData(pmode)
         self.process_mode_combo.setCurrentIndex(pidx if pidx >= 0 else 0)
         self.on_process_mode_changed()  # sync spinner enabled
+        translate_tree(self, self.ui_language)
+
+    def _change_language(self):
+        self.ui_language = self.language_combo.currentData()
+        translate_tree(self, self.ui_language)
 
     def resizeEvent(self, event):
         """Record where a resize settled.
@@ -4992,6 +5015,7 @@ class VideoHighlighterGUI(QWidget):
             },
             "ui": {
                 "suppress_no_cache_warning": self.config_data.get("ui", {}).get("suppress_no_cache_warning", False),
+                "language": self.ui_language,
             },
         }
         with open(CONFIG_FILE, "w", encoding="utf-8") as f:
@@ -5320,6 +5344,18 @@ class VideoHighlighterGUI(QWidget):
             return
 
         # --- GUI thread only below ---
+        if text.startswith("Codificador utilizado:"):
+            self._last_encoder = text.split(":", 1)[1].strip()
+        elif text.startswith("⏱️ Tiempo de análisis:"):
+            try:
+                self._analysis_seconds = float(text.split(":", 1)[1].strip().split()[0])
+            except (ValueError, IndexError):
+                pass
+        elif text.startswith("⏱️ Tiempo de exportación:"):
+            try:
+                self._export_seconds = float(text.split(":", 1)[1].strip().split()[0])
+            except (ValueError, IndexError):
+                pass
         # Insert through a standalone cursor rather than QTextEdit.append(),
         # which moves the widget's own cursor and clears the user's selection —
         # that made text impossible to select/copy while logs were streaming.
@@ -5852,7 +5888,11 @@ class VideoHighlighterGUI(QWidget):
             page = getattr(self, "simple_page", None)
             if page is not None:
                 length = page.length_key()
-            apply_simple_run(config, length)
+            gaming_minutes = page.gaming_minutes() if page is not None else None
+            if gaming_minutes is not None:
+                apply_gaming_run(config, gaming_minutes)
+            else:
+                apply_simple_run(config, length)
 
         # Remove None values
         config = {k: v for k,v in config.items() if v is not None}
@@ -5880,6 +5920,44 @@ class VideoHighlighterGUI(QWidget):
         else:
             config["use_time_range"] = False
 
+        # The analysis cache is written before clip export. Offer reuse after a
+        # cancelled or failed render, and only for the exact current video and
+        # detector settings. VideoAnalysisCache.load validates identity and the
+        # analysis signature before anything is offered to the user.
+        if (len(video_paths) == 1 and not config["use_time_range"]
+                and not config.get("force_reprocess")):
+            try:
+                source = video_paths[0]
+                cap = cv2.VideoCapture(source)
+                source_fps = cap.get(cv2.CAP_PROP_FPS) or 25.0
+                source_frames = cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0
+                cap.release()
+                source_duration = source_frames / source_fps
+                cache_params = build_analysis_cache_params(
+                    config, self.config_data, int(config["sample_rate"]),
+                    source_duration)
+                cache_store = VideoAnalysisCache()
+                previous = cache_store.load(source, params=cache_params)
+                completed_stages = cache_store.load_stages(source, cache_params)
+                if previous or completed_stages:
+                    from PySide6.QtWidgets import QMessageBox
+                    dialog = QMessageBox(self)
+                    dialog.setWindowTitle("Análisis anterior")
+                    detail = ("Etapas guardadas: " + ", ".join(sorted(completed_stages))
+                              if not previous else "La detección anterior está completa.")
+                    dialog.setText("Se encontró un análisis anterior. ¿Deseas continuar?\n" + detail)
+                    continue_btn = dialog.addButton("Continuar", QMessageBox.AcceptRole)
+                    restart_btn = dialog.addButton("Reiniciar análisis", QMessageBox.DestructiveRole)
+                    dialog.addButton("Cancelar", QMessageBox.RejectRole)
+                    dialog.exec()
+                    if dialog.clickedButton() is restart_btn:
+                        cache_store.restart_analysis(source, cache_params)
+                        config["force_reprocess"] = True
+                    elif dialog.clickedButton() is not continue_btn:
+                        return
+            except Exception as exc:
+                self.append_log(f"No se pudo revisar el análisis anterior: {exc}")
+
         # UI state changes
         self.process_progress_bar.setVisible(True)
         self.process_progress_bar.setRange(0, 100)
@@ -5904,6 +5982,10 @@ class VideoHighlighterGUI(QWidget):
         self._sync_simple_start()
 
         # Create and start worker
+        self._run_started_at = time.time()
+        self._last_encoder = "No registrado"
+        self._analysis_seconds = None
+        self._export_seconds = None
         self.worker = Worker(video_paths, config)
         self._preview_enabled = self.live_preview_checkbox.isChecked()
         self.worker.preview_enabled = self._preview_enabled
@@ -6314,8 +6396,12 @@ class VideoHighlighterGUI(QWidget):
                     f"📈 Analyzed videos: +{newly_analyzed} this run — lifetime total: {total_analyzed}"
                 )
 
-            self.task_label.setText("✅ Complete!")
+            self.task_label.setText("✅ Completado")
             self.task_label.setStyleSheet("color: #4CAF50; font-weight: bold;")
+            try:
+                self._show_completion_summary(output_file)
+            except Exception as exc:
+                self.append_log(f"⚠️ No se pudo mostrar el resumen final: {exc}")
         elif not was_cancelled:
             self.append_log("\n⚠️ === PIPELINE COMPLETED WITH ERRORS ===")
             self.append_log("❌ No output file was generated. Check the log for errors.")
@@ -6369,6 +6455,71 @@ class VideoHighlighterGUI(QWidget):
                 self.append_log(f"⚠️ Could not update LLM context: {e}")
 
         self.pipeline_cleanup()
+
+    def _show_completion_summary(self, output_file):
+        files = ([item[1] if isinstance(item, tuple) else item for item in output_file]
+                 if isinstance(output_file, list) else [output_file])
+        files = [path for path in files if isinstance(path, str) and os.path.isfile(path)]
+        if not files:
+            return
+        path = files[0]
+        self._last_output_file = path
+        source_paths = self.get_file_list()
+        source = source_paths[0] if source_paths else ""
+
+        def media_info(file_path):
+            cap = cv2.VideoCapture(file_path)
+            fps = cap.get(cv2.CAP_PROP_FPS) or 0
+            frames = cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0
+            width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 0)
+            height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0)
+            cap.release()
+            return (frames / fps if fps else 0, width, height, fps)
+
+        original_duration = media_info(source)[0] if source and os.path.isfile(source) else 0
+        selected_duration, width, height, fps = media_info(path)
+        from modules.media.clip_export import clips_directory, sanitize_base_name
+        clips_dir = clips_directory(path, sanitize_base_name(
+            os.path.splitext(os.path.basename(source or path))[0]))
+        self._last_clips_dir = clips_dir
+        clips_count = len(list(Path(clips_dir).glob("*.mp4"))) if os.path.isdir(clips_dir) else 0
+        try:
+            import torch
+            cuda_active = torch.cuda.is_available()
+            gpu = torch.cuda.get_device_name(0) if cuda_active else "No disponible"
+        except Exception:
+            cuda_active, gpu = False, "No disponible"
+        elapsed = time.time() - getattr(self, "_run_started_at", time.time())
+        analysis_time = (self._analysis_seconds if self._analysis_seconds is not None
+                         else elapsed)
+        export_time = self._export_seconds
+        export_display = (self.format_time(export_time) if export_time is not None
+                          else "No registrado")
+        provider = self.llm_chat.backend_combo.currentData() if hasattr(self, "llm_chat") else "none"
+        ai_label = {"gemini": "Gemini", "ollama": "Ollama", "llama-cpp": "GGUF local",
+                    "none": "Ninguna"}.get(provider, "Ninguna")
+        summary = ("ANÁLISIS COMPLETADO\n"
+                   f"Video original: {self.format_time(original_duration)}  ·  "
+                   f"Duración seleccionada: {self.format_time(selected_duration)}\n"
+                   f"Clips encontrados: {clips_count}  ·  "
+                   f"Análisis: {self.format_time(analysis_time)}  ·  "
+                   f"Exportación: {export_display}  ·  "
+                   f"Tiempo total: {self.format_time(elapsed)}\n"
+                   f"GPU: {gpu}  ·  CUDA: {'Activo' if cuda_active else 'Inactivo'}\n"
+                   f"Codificador: {self._last_encoder}  ·  "
+                   f"Resolución: {width}×{height}  ·  FPS: {fps:.2f}  ·  IA: {ai_label}")
+        self.append_log(summary)
+        self.simple_page.show_completion(summary, has_clips=clips_count > 0)
+
+    def open_result_location(self, kind: str):
+        from PySide6.QtCore import QUrl
+        from PySide6.QtGui import QDesktopServices
+        output = getattr(self, "_last_output_file", "")
+        path = (output if kind == "video" else
+                getattr(self, "_last_clips_dir", "") if kind == "clips" else
+                os.path.dirname(output))
+        if path and os.path.exists(path):
+            QDesktopServices.openUrl(QUrl.fromLocalFile(os.path.abspath(path)))
 
     def pipeline_cancelled(self):
         """Handle pipeline cancellation"""

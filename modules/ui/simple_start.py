@@ -18,13 +18,14 @@ from PySide6.QtCore import QSettings, Qt, QTimer
 from PySide6.QtGui import QPixmap
 from PySide6.QtWidgets import (
     QComboBox, QFrame, QHBoxLayout, QLabel, QListWidget, QProgressBar,
-    QPushButton, QScrollArea, QSizePolicy, QTextEdit, QVBoxLayout, QWidget,
+    QPushButton, QScrollArea, QSizePolicy, QSpinBox, QTextEdit, QVBoxLayout, QWidget,
 )
 
 from modules.system.app_paths import resource_path
 from modules.segments.simple_run import SIMPLE_LENGTHS, idle_status_text, is_video_path
 from modules.ui.collapsible import CollapsibleSection
 from modules.ui.theme import DARK
+from modules.ui.i18n import translate_tree
 from version import __build_date__, __edition__, __version__
 
 SETTINGS_ORG = "VideoHighlighter"
@@ -216,16 +217,40 @@ class SimpleStartPage(QWidget):
         root.addWidget(self.file_list)
 
         length_row = QHBoxLayout()
+        self.preset = QComboBox()
+        self.preset.addItem("General", "general")
+        self.preset.addItem("Gaming largo", "gaming_long")
+        length_row.addWidget(self.preset)
         length_lab = QLabel("Highlight length")
         length_lab.setStyleSheet(f"color: {p.text_dim};")
         self.length = QComboBox()
         self.length.addItem("Short  — about 1–2 minutes", "short")
         self.length.addItem("Medium  — about 4 minutes", "medium")
         self.length.addItem("Longer  — about 7 minutes", "long")
+        for minutes in (5, 10, 15, 20):
+            self.length.addItem(f"{minutes} min", f"gaming_{minutes}")
+        self.length.addItem("Personalizado", "gaming_custom")
         self.length.setCurrentIndex(1)
         self.length.setMinimumWidth(200)
         length_row.addWidget(length_lab)
         length_row.addWidget(self.length)
+        self.custom_minutes = QSpinBox()
+        self.custom_minutes.setRange(1, 180)
+        self.custom_minutes.setValue(10)
+        self.custom_minutes.setSuffix(" min")
+        length_row.addWidget(self.custom_minutes)
+        def sync_gaming_controls():
+            gaming = self.preset.currentData() == "gaming_long"
+            for i in range(self.length.count()):
+                self.length.model().item(i).setEnabled((i >= 3) if gaming else (i < 3))
+            if gaming and self.length.currentIndex() < 3:
+                self.length.setCurrentIndex(4)
+            elif not gaming and self.length.currentIndex() >= 3:
+                self.length.setCurrentIndex(1)
+            self.custom_minutes.setVisible(gaming and self.length.currentData() == "gaming_custom")
+        self.preset.currentIndexChanged.connect(sync_gaming_controls)
+        self.length.currentIndexChanged.connect(sync_gaming_controls)
+        sync_gaming_controls()
         length_row.addStretch()
         self.clear_btn = QPushButton("Remove")
         self.clear_btn.clicked.connect(self._remove_selected)
@@ -276,6 +301,23 @@ class SimpleStartPage(QWidget):
         result_row.addStretch()
         root.addLayout(result_row)
 
+        self.summary = QLabel("")
+        self.summary.setWordWrap(True)
+        self.summary.setVisible(False)
+        root.addWidget(self.summary)
+        output_row = QHBoxLayout()
+        self.video_btn = QPushButton("Abrir video final")
+        self.folder_btn = QPushButton("Abrir carpeta de salida")
+        self.clips_btn = QPushButton("Abrir clips")
+        self.video_btn.clicked.connect(lambda: gui.open_result_location("video"))
+        self.folder_btn.clicked.connect(lambda: gui.open_result_location("folder"))
+        self.clips_btn.clicked.connect(lambda: gui.open_result_location("clips"))
+        for button in (self.video_btn, self.folder_btn, self.clips_btn):
+            button.setVisible(False)
+            output_row.addWidget(button)
+        output_row.addStretch()
+        root.addLayout(output_row)
+
         self.chat_section = CollapsibleSection(
             "Ask about this video", self,
             expanded=False, settings_key="ui/simple_chat")
@@ -320,6 +362,12 @@ class SimpleStartPage(QWidget):
         data = self.length.currentData()
         return data if data in SIMPLE_LENGTHS else "medium"
 
+    def gaming_minutes(self) -> int | None:
+        if self.preset.currentData() != "gaming_long":
+            return None
+        key = self.length.currentData()
+        return self.custom_minutes.value() if key == "gaming_custom" else int(key.split("_")[-1])
+
     def refresh_files(self, *, update_idle_status: bool = True) -> None:
         self.file_list.clear()
         paths = self._gui.get_file_list()
@@ -331,10 +379,18 @@ class SimpleStartPage(QWidget):
         self.drop.set_loaded(paths)
         if update_idle_status:
             self.status.setText(idle_status_text(len(paths)))
+        translate_tree(self, getattr(self._gui, "ui_language", "es"))
 
     def show_results(self, on: bool) -> None:
         self.timeline_btn.setVisible(on)
         self.report_btn.setVisible(on)
+
+    def show_completion(self, summary: str, *, has_clips: bool) -> None:
+        self.summary.setText(summary)
+        self.summary.setVisible(True)
+        self.video_btn.setVisible(True)
+        self.folder_btn.setVisible(True)
+        self.clips_btn.setVisible(has_clips)
 
     def attach_chat(self, chat: QWidget | None) -> None:
         """Borrow the app's one chat panel into the folded section.
@@ -415,9 +471,11 @@ class SimpleStartPage(QWidget):
         self.drop.setEnabled(not busy)
         self.clear_btn.setEnabled(not busy)
         self.length.setEnabled(not busy)
+        self.preset.setEnabled(not busy)
+        self.custom_minutes.setEnabled(not busy)
         self.file_list.setEnabled(gui.file_list.isEnabled())
         task = gui.task_label.text() or ""
-        done = "Complete" in task
+        done = "Complete" in task or "Completado" in task
         self.show_results(done)
         self.chat_section.set_hint(
             "ask why these moments were picked" if done
@@ -430,6 +488,7 @@ class SimpleStartPage(QWidget):
         self.refresh_files(update_idle_status=not busy and not done)
         if busy or done:
             self.status.setText(task)
+        translate_tree(self, getattr(self._gui, "ui_language", "es"))
 
     def append_log(self, text: str) -> None:
         from PySide6.QtGui import QTextCursor

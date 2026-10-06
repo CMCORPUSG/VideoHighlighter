@@ -6483,10 +6483,25 @@ class VideoHighlighterGUI(QWidget):
             os.path.splitext(os.path.basename(source or path))[0]))
         self._last_clips_dir = clips_dir
         clips_count = len(list(Path(clips_dir).glob("*.mp4"))) if os.path.isdir(clips_dir) else 0
+        selected_count = clips_count
+        if source and os.path.isfile(source) and self.worker:
+            try:
+                run_config = self.worker.gui_config or {}
+                params = build_analysis_cache_params(
+                    run_config, self.config_data,
+                    int(run_config.get("sample_rate", 5)), original_duration)
+                analyzed = VideoAnalysisCache().load(source, params=params)
+                if analyzed and "highlight_segments" in analyzed:
+                    selected_count = len(analyzed["highlight_segments"])
+            except Exception:
+                pass
         try:
             import torch
-            cuda_active = torch.cuda.is_available()
-            gpu = torch.cuda.get_device_name(0) if cuda_active else "No disponible"
+            cuda_available = torch.cuda.is_available()
+            gpu = torch.cuda.get_device_name(0) if cuda_available else "No disponible"
+            from modules.system.device_utils import detect_best_device
+            cuda_active = detect_best_device(
+                log_fn=lambda *args, **kwargs: None).pytorch_device == "cuda"
         except Exception:
             cuda_active, gpu = False, "No disponible"
         elapsed = time.time() - getattr(self, "_run_started_at", time.time())
@@ -6501,7 +6516,7 @@ class VideoHighlighterGUI(QWidget):
         summary = ("ANÁLISIS COMPLETADO\n"
                    f"Video original: {self.format_time(original_duration)}  ·  "
                    f"Duración seleccionada: {self.format_time(selected_duration)}\n"
-                   f"Clips encontrados: {clips_count}  ·  "
+                   f"Clips encontrados: {selected_count}  ·  "
                    f"Análisis: {self.format_time(analysis_time)}  ·  "
                    f"Exportación: {export_display}  ·  "
                    f"Tiempo total: {self.format_time(elapsed)}\n"

@@ -273,8 +273,26 @@ class SimpleStartPage(QWidget):
         self.gemini_settings_btn = QPushButton("Configurar Gemini")
         self.gemini_settings_btn.clicked.connect(self._open_gemini_settings)
         ai_row.addWidget(self.gemini_settings_btn)
+        self.gemini_diagnostic_btn = QPushButton("Probar Gemini con 2 candidatos")
+        self.gemini_diagnostic_btn.clicked.connect(gui.run_gemini_diagnostic)
+        ai_row.addWidget(self.gemini_diagnostic_btn)
         ai_row.addStretch()
         root.addLayout(ai_row)
+
+        cache_row = QHBoxLayout()
+        cache_row.addWidget(QLabel("Análisis local:"))
+        self.cache_mode = QComboBox()
+        self.cache_mode.addItem("Reutilizar análisis", "reuse")
+        self.cache_mode.addItem("Reconstruir señales locales", "rebuild_signals")
+        self.cache_mode.addItem("Reiniciar todo", "restart_all")
+        self.cache_mode.setToolTip(
+            "Reutilizar: usa la caché válida. Reconstruir: recalcula movimiento, "
+            "audio y los detectores de objetos/acciones habilitados; conserva "
+            "transcripción compatible. "
+            "Reiniciar todo: recalcula todas las etapas de este video.")
+        cache_row.addWidget(self.cache_mode)
+        cache_row.addStretch()
+        root.addLayout(cache_row)
 
         self.status = QLabel("Ready")
         self.status.setStyleSheet(f"color: {p.text_dim}; font-weight: 600;")

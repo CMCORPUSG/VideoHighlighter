@@ -7,8 +7,8 @@ import cv2
 
 
 def storyboard_parts(video_path: str, start: float, end: float,
-                     count: int = 5) -> list[dict]:
-    """Return at most five labelled JPEG frames, bounded to 320 px wide."""
+                     count: int = 5, extra_seconds=()) -> list[dict]:
+    """Return a temporal arc plus up to two evidence peaks as small JPEGs."""
     count = max(1, min(5, int(count)))
     if end <= start:
         return []
@@ -18,9 +18,14 @@ def storyboard_parts(video_path: str, start: float, end: float,
         return []
     parts = []
     try:
-        for i in range(count):
-            fraction = (i + 0.5) / count
-            second = float(start) + (float(end) - float(start)) * fraction
+        fractions = [0.03, 0.25, 0.5, 0.75, 0.97] if count == 5 else [
+            (i + 0.5) / count for i in range(count)]
+        times = [float(start) + (float(end) - float(start)) * fraction
+                 for fraction in fractions]
+        times.extend(float(t) for t in list(extra_seconds)[:2]
+                     if start < float(t) < end and
+                     all(abs(float(t) - old) >= 3 for old in times))
+        for i, second in enumerate(sorted(times)):
             cap.set(cv2.CAP_PROP_POS_MSEC, second * 1000.0)
             ok, frame = cap.read()
             if not ok or frame is None:
@@ -32,7 +37,7 @@ def storyboard_parts(video_path: str, start: float, end: float,
             ok, data = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 62])
             if not ok or len(data) > 180_000:
                 continue
-            parts.append({"text": f"Fotograma {i + 1}/{count} en {second:.1f} s"})
+            parts.append({"text": f"Fotograma {i + 1}/{len(times)} en {second:.1f} s"})
             parts.append({"inlineData": {"mimeType": "image/jpeg",
                                           "data": base64.b64encode(data).decode("ascii")}})
     finally:

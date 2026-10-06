@@ -41,6 +41,11 @@ from typing import Callable, Mapping, Optional
 DEFAULTS = {"narrate_clips": True, "narrate_chapters": True}
 
 
+def provider_allows_narration(config: Mapping) -> bool:
+    """The automatic local narration pass belongs only to Ollama runs."""
+    return config.get("ai_provider") == "ollama"
+
+
 def _entry(config: Mapping) -> dict:
     """The model to narrate with, as the GUI stored it."""
     entry = config.get("narration_model") or {}

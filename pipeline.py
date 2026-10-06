@@ -667,6 +667,18 @@ def run_highlighter(video_path, sample_rate=5, gui_config: dict = None,
             sample_rate=sample_rate,
             video_duration=video_duration
         )
+        cache_mode = gui_config.get("cache_mode", "reuse")
+        if cache_mode == "restart_all":
+            VideoAnalysisCache(cache_dir=gui_config.get("cache_dir", "./cache")).restart_analysis(
+                processed_video_path, analysis_params)
+            log("🔄 Reiniciar todo: se recalcularán todas las etapas de este video.")
+        elif cache_mode == "rebuild_signals":
+            log("🔄 Reconstruir señales locales: se recalcularán movimiento, audio, "
+                "y los detectores de objetos/acciones habilitados; se conservará "
+                "la transcripción compatible.")
+            if not gui_config.get("highlight_objects") or not gui_config.get("interesting_actions"):
+                log("ℹ️ Los detectores sin clases/acciones configuradas seguirán vacíos. "
+                    "Puedes habilitarlos en Configuración detallada.")
 
         # Initialize cache controls
         use_cache = gui_config.get("use_cache", True)
@@ -684,7 +696,7 @@ def run_highlighter(video_path, sample_rate=5, gui_config: dict = None,
         using_cache = False
 
         # Try to load from cache if enabled
-        if use_cache and not force_reprocess:
+        if use_cache and not force_reprocess and cache_mode != "rebuild_signals":
             cache = VideoAnalysisCache(cache_dir=gui_config.get("cache_dir", "./cache"))
             try:
                 start_time_cache = time.time()
@@ -806,6 +818,9 @@ def run_highlighter(video_path, sample_rate=5, gui_config: dict = None,
                 if not force_reprocess:
                     completed_stages = stage_cache.load_stages(
                         processed_video_path, analysis_params)
+                    if cache_mode == "rebuild_signals":
+                        for name in ("motion", "audio", "objects", "actions"):
+                            completed_stages.pop(name, None)
                 if completed_stages:
                     log("Se encontraron etapas anteriores: " +
                         ", ".join(sorted(completed_stages)))
@@ -2224,12 +2239,17 @@ def run_highlighter(video_path, sample_rate=5, gui_config: dict = None,
         if SEGMENTATION_MODE == "events":
             from modules.segments.event_segments import build_event_segments
             semantic_review = None
+            reviewer = None
             if (gui_config.get("ai_provider") == "gemini" and
                     gui_config.get("gemini_mode", "needed") != "off"):
                 from llm.gemini_event_review import GeminiEventReview
 
                 def _candidate_context(item):
                     a, b = item["start"], item["end"]
+                    start_second, end_second = int(a), int(b)
+                    def _peak(curve, left, right):
+                        part = curve[max(0, left):max(0, right)]
+                        return round(float(np.max(part)), 3) if len(part) else 0.0
                     objects = sorted({str(name) for sec, names in object_detections.items()
                                       if a <= float(sec) <= b for name in names})[:20]
                     actions = sorted({str(seq[4]) for seq in selected_sequences
@@ -2239,11 +2259,16 @@ def run_highlighter(video_path, sample_rate=5, gui_config: dict = None,
                                       if part.get("start", 0) < b and part.get("end", 0) > a)
                     return {"objetos": objects, "acciones": actions,
                             "transcripcion": speech[:1500],
-                            "cambios_escena": sum(a <= float(s) < b for s, _ in scenes)}
+                            "cambios_escena": sum(a <= float(s) < b for s, _ in scenes),
+                            "motion_score": _peak(motion_peak_score, start_second, end_second),
+                            "audio_score": _peak(audio_score, start_second, end_second),
+                            "contexto_previo_score": _peak(score, start_second - 20, start_second),
+                            "contexto_posterior_score": _peak(score, end_second, end_second + 20)}
 
                 try:
                     reviewer = GeminiEventReview(
                         processed_video_path,
+                        identity_path=video_path,
                         model=gui_config.get("gemini_model", "gemini-3.5-flash-lite"),
                         mode=gui_config.get("gemini_mode", "needed"),
                         max_candidates=gui_config.get("gemini_max_candidates", 30),
@@ -2274,6 +2299,11 @@ def run_highlighter(video_path, sample_rate=5, gui_config: dict = None,
                 semantic_review=semantic_review,
                 log_fn=log,
             )
+            if gui_config.get("ai_provider") == "gemini":
+                gui_config["gemini_run_status"] = (
+                    dict(reviewer.status) if reviewer else
+                    {"reason": "desactivado" if gui_config.get("gemini_mode") == "off"
+                     else "fallo", "valid": 0, "planned": 0})
         elif SEGMENTATION_MODE == "legacy_auto" or CLIP_TIME == 0:
             # ========== AUTO-SEGMENTATION MODE ==========
             log("🔧 CLIP_TIME=0 → using auto-segmentation (variable-length clips)")
@@ -2544,12 +2574,14 @@ def run_highlighter(video_path, sample_rate=5, gui_config: dict = None,
                 # the record they update — the page and the JSON must not be
                 # able to disagree about what the model said.
                 try:
-                    from modules.narration.story_run import narrate_report_file
+                    from modules.narration.story_run import (
+                        narrate_report_file, provider_allows_narration)
 
-                    narrate_report_file(
-                        f"{base}_why.json", config=gui_config, log_fn=log,
-                        cancel_fn=(lambda: bool(cancel_flag
-                                                and cancel_flag.is_set())))
+                    if provider_allows_narration(gui_config):
+                        narrate_report_file(
+                            f"{base}_why.json", config=gui_config, log_fn=log,
+                            cancel_fn=(lambda: bool(cancel_flag
+                                                    and cancel_flag.is_set())))
                 except Exception as _ne:
                     log(f"⚠️ Narration skipped: {_ne}")
             except Exception as _re:
@@ -3138,6 +3170,10 @@ def run_highlighter(video_path, sample_rate=5, gui_config: dict = None,
                 log(f"⚠️ Timeline viewer failed: {e}")
         # ============================================
 
+        if not segments:
+            log("ℹ️ No se exportó un resumen: ningún evento superó la selección. "
+                "Revisa el análisis o los candidatos en la línea de tiempo.")
+            return None
         return OUTPUT_FILE
 
     except RuntimeError as e:

@@ -8,6 +8,7 @@ from __future__ import annotations
 import numpy as np
 
 from modules.segments.event_rank import assess_candidate, combine_semantic
+from llm.gemini_event_review import semantic_approved
 
 
 def _time(value):
@@ -173,10 +174,19 @@ def build_event_segments(*, video_duration, score, scenes=None,
             semantic_review(ranked)
         except Exception:
             log_fn("⚠️ Falló la revisión semántica; continúa el ranking local.")
-    finalists = [item for item in ranked
-                 if item["local_quality"] >= floor or
-                 (item.get("gemini", {}).get("relevante") and
-                  item.get("gemini", {}).get("interes_espectador", 0) >= 0.75)]
+    has_semantic_evidence = any(item.get("gemini") for item in ranked)
+    if has_semantic_evidence:
+        # Once semantic evidence exists, do not refill the summary with local
+        # motion-only candidates just because Gemini rejected most of the pool.
+        finalists = [item for item in ranked
+                     if item.get("gemini") and semantic_approved(item["gemini"])]
+        # Failed evaluations retain a small, high-confidence local fallback.
+        # Unevaluated candidates never refill the duration budget.
+        finalists.extend([item for item in ranked
+                          if item.get("gemini_failed") and
+                          item["local_quality"] >= max(floor, 0.8)][:2])
+    else:
+        finalists = [item for item in ranked if item["local_quality"] >= floor]
     for item in finalists:
         item["final_quality"] = combine_semantic(
             item["local_quality"], item.get("gemini"))

@@ -12,13 +12,30 @@ ORG = "VideoHighlighter"
 APP = "Gemini"
 
 
+def ai_status_label(provider: str, status: dict | None = None) -> str:
+    if provider != "gemini":
+        return {"ollama": "Ollama local", "llama-cpp": "GGUF local",
+                "none": "Ninguna"}.get(provider, "Ninguna")
+    status = status or {}
+    valid, planned = status.get("valid", 0), status.get("planned", 0)
+    if status.get("reason") == "activo":
+        return "Gemini — activo"
+    if valid:
+        return f"Gemini — parcial ({valid}/{planned} candidatos)"
+    if status.get("reason") == "desactivado":
+        return "Gemini — desactivado"
+    if status.get("reason") == "sin iniciar" and not planned:
+        return "Gemini — sin candidatos"
+    return "Gemini — fallo; ranking local utilizado"
+
+
 def gemini_preferences() -> dict:
     settings = QSettings(ORG, APP)
     return {
         "model": str(settings.value("model", "gemini-3.5-flash-lite")),
         "mode": str(settings.value("mode", "needed")),
-        "max_candidates": max(0, min(100, int(settings.value("max_candidates", 30)))),
-        "max_calls": max(0, min(100, int(settings.value("max_calls", 30)))),
+        "max_candidates": max(0, min(40, int(settings.value("max_candidates", 30)))),
+        "max_calls": max(0, min(30, int(settings.value("max_calls", 30)))),
     }
 
 
@@ -53,11 +70,11 @@ class GeminiSettingsDialog(QDialog):
         self.mode.setCurrentIndex(max(0, self.mode.findData(saved["mode"])))
         form.addRow("Uso de Gemini:", self.mode)
         self.max_candidates = QSpinBox()
-        self.max_candidates.setRange(0, 100)
+        self.max_candidates.setRange(0, 40)
         self.max_candidates.setValue(saved["max_candidates"])
         form.addRow("Máximo candidatos por video:", self.max_candidates)
         self.max_calls = QSpinBox()
-        self.max_calls.setRange(0, 100)
+        self.max_calls.setRange(0, 30)
         self.max_calls.setValue(saved["max_calls"])
         form.addRow("Máximo llamadas por video:", self.max_calls)
         layout.addLayout(form)

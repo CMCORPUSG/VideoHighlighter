@@ -9,6 +9,16 @@ from llm.llm_module import VideoContextBuilder, GenerationCancelled
 from llm.gemini_credentials import get_key
 
 
+class GeminiEvaluationError(RuntimeError):
+    """Safe diagnostic; never contains request headers, body or API key."""
+
+    def __init__(self, kind: str, description: str, *, retryable: bool = False):
+        self.kind = kind
+        self.description = description
+        self.retryable = retryable
+        super().__init__(f"{kind}: {description}")
+
+
 class GeminiClient:
     def __init__(self, model: str = "gemini-3.5-flash-lite"):
         self.model = model
@@ -26,7 +36,7 @@ class GeminiClient:
         self._ready = False
 
     def evaluate_event(self, context: dict, storyboard: list[dict] | None = None,
-                       timeout: float = 35) -> dict:
+                       timeout: float = 90) -> dict:
         """Classify one locally shortlisted event with validated JSON."""
         key = get_key()
         if not key:
@@ -36,20 +46,25 @@ class GeminiClient:
             "No supongas kills ni resultados que no sean visibles. Distingue movimiento "
             "rutinario, menús y cargas de tensión, consecuencia, apoyo al equipo, humor, "
             "objetivos o cambios reales en la partida. Si la evidencia es insuficiente, "
-            "asigna puntuaciones bajas y explica la duda. Responde solo JSON en español.\n"
+            "asigna puntuaciones bajas y explica la duda. Decide si el contexto "
+            "y el desenlace se ven suficientemente. Los tres valores numéricos "
+            "importancia, interes_espectador y consecuencia DEBEN estar en la "
+            "escala decimal 0.0–1.0 (nunca 0–100). Responde solo JSON en español.\n"
             "Datos locales: " + json.dumps(context, ensure_ascii=False)[:5000]
         )
-        parts = [{"text": prompt}] + (storyboard or [])[:10]
+        parts = [{"text": prompt}] + (storyboard or [])[:14]
         schema = {"type": "OBJECT", "properties": {
             "relevante": {"type": "BOOLEAN"},
             "categoria": {"type": "STRING"},
-            "importancia": {"type": "NUMBER"},
-            "interes_espectador": {"type": "NUMBER"},
-            "consecuencia": {"type": "NUMBER"},
+            "importancia": {"type": "NUMBER", "minimum": 0, "maximum": 1},
+            "interes_espectador": {"type": "NUMBER", "minimum": 0, "maximum": 1},
+            "consecuencia": {"type": "NUMBER", "minimum": 0, "maximum": 1},
+            "contexto_suficiente": {"type": "BOOLEAN"},
             "evento_completo": {"type": "BOOLEAN"},
             "motivo": {"type": "STRING"},
         }, "required": ["relevante", "categoria", "importancia",
-                        "interes_espectador", "consecuencia", "evento_completo", "motivo"]}
+                        "interes_espectador", "consecuencia", "contexto_suficiente",
+                        "evento_completo", "motivo"]}
         try:
             response = requests.post(
                 f"https://generativelanguage.googleapis.com/v1beta/models/{self.model}:generateContent",
@@ -60,36 +75,72 @@ class GeminiClient:
                                            "responseSchema": schema}},
                 timeout=timeout,
             )
+        except requests.exceptions.Timeout:
+            raise GeminiEvaluationError("timeout", "La respuesta multimedia tardó demasiado.",
+                                        retryable=True) from None
+        except requests.exceptions.SSLError:
+            raise GeminiEvaluationError("TLS", "Falló la conexión segura.") from None
+        except requests.exceptions.ConnectionError:
+            raise GeminiEvaluationError("red", "No se pudo establecer la conexión.",
+                                        retryable=True) from None
         except requests.RequestException:
-            raise RuntimeError("No se pudo conectar con Gemini.") from None
+            raise GeminiEvaluationError("red", "Falló la solicitud de red.",
+                                        retryable=True) from None
         if response.status_code in (401, 403):
-            raise RuntimeError("Gemini rechazó la API key.")
+            raise GeminiEvaluationError(f"HTTP {response.status_code}",
+                                        "Gemini rechazó la clave o el acceso al modelo.")
+        if response.status_code == 404:
+            raise GeminiEvaluationError("HTTP 404", "Modelo no disponible para esta clave.")
+        if response.status_code == 400:
+            raise GeminiEvaluationError("HTTP 400", "Solicitud o esquema rechazado por Gemini.")
         if response.status_code == 429:
-            raise RuntimeError("Se alcanzó el límite de solicitudes de Gemini.")
+            raise GeminiEvaluationError("HTTP 429", "Límite temporal alcanzado.",
+                                        retryable=True)
+        if response.status_code in (500, 502, 503, 504):
+            raise GeminiEvaluationError(f"HTTP {response.status_code}",
+                                        "Servicio temporalmente no disponible.",
+                                        retryable=True)
         if not response.ok:
-            raise RuntimeError(f"Gemini respondió con el código {response.status_code}.")
+            raise GeminiEvaluationError(f"HTTP {response.status_code}",
+                                        "Solicitud rechazada por Gemini.")
         try:
             data = response.json()
+        except ValueError:
+            raise GeminiEvaluationError("parsing", "La respuesta HTTP no contiene JSON válido.") from None
+        try:
             raw = "".join(part.get("text", "")
                           for candidate in data.get("candidates", [])
                           for part in candidate.get("content", {}).get("parts", []))
-            result = json.loads(raw)
+            if not raw:
+                raise GeminiEvaluationError("respuesta vacía", "Gemini no devolvió texto evaluable.")
+            try:
+                result = json.loads(raw)
+            except ValueError:
+                raise GeminiEvaluationError("JSON inválido", "No se pudo interpretar la respuesta.") from None
             if not isinstance(result, dict):
-                raise ValueError()
-            for name in ("relevante", "evento_completo"):
+                raise GeminiEvaluationError("schema inválido", "Se esperaba un objeto JSON.")
+            required = ("relevante", "categoria", "importancia", "interes_espectador",
+                        "consecuencia", "contexto_suficiente", "evento_completo", "motivo")
+            missing = [name for name in required if name not in result]
+            if missing:
+                raise GeminiEvaluationError("schema inválido",
+                                            "Faltan campos: " + ", ".join(missing))
+            for name in ("relevante", "contexto_suficiente", "evento_completo"):
                 if type(result.get(name)) is not bool:
-                    raise ValueError()
+                    raise GeminiEvaluationError("schema inválido", f"{name} no es booleano.")
             for name in ("importancia", "interes_espectador", "consecuencia"):
                 value = result.get(name)
                 if type(value) not in (float, int) or not 0 <= value <= 1:
-                    raise ValueError()
+                    raise GeminiEvaluationError("schema inválido", f"{name} debe estar entre 0 y 1.")
             if not isinstance(result.get("categoria"), str) or not isinstance(result.get("motivo"), str):
-                raise ValueError()
+                raise GeminiEvaluationError("schema inválido", "Categoría o motivo no es texto.")
             result["categoria"] = result["categoria"][:80]
             result["motivo"] = result["motivo"][:500]
             return result
+        except GeminiEvaluationError:
+            raise
         except (ValueError, TypeError, KeyError):
-            raise RuntimeError("Gemini devolvió una evaluación inválida; se usará el ranking local.") from None
+            raise GeminiEvaluationError("schema inválido", "Faltan campos o valores válidos.") from None
 
     def query(self, user_message: str, analysis_data: dict | None = None,
               free_chat_mode: bool = False, video_path: str = "",

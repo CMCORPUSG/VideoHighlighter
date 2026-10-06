@@ -5922,6 +5922,10 @@ class VideoHighlighterGUI(QWidget):
                 apply_gaming_run(config, gaming_minutes)
             else:
                 apply_simple_run(config, length)
+            cache_mode = page.cache_mode.currentData() if page is not None else "reuse"
+            config["cache_mode"] = cache_mode
+            if cache_mode == "restart_all":
+                config["force_reprocess"] = True
 
         from modules.ui.gemini_settings import gemini_preferences
         gemini = gemini_preferences()
@@ -5967,7 +5971,8 @@ class VideoHighlighterGUI(QWidget):
         # detector settings. VideoAnalysisCache.load validates identity and the
         # analysis signature before anything is offered to the user.
         if (len(video_paths) == 1 and not config["use_time_range"]
-                and not config.get("force_reprocess")):
+                and not config.get("force_reprocess")
+                and config.get("cache_mode", "reuse") == "reuse"):
             try:
                 source = video_paths[0]
                 cap = cv2.VideoCapture(source)
@@ -6558,8 +6563,10 @@ class VideoHighlighterGUI(QWidget):
         export_display = (self.format_time(export_time) if export_time is not None
                           else "No registrado")
         provider = (self.worker.gui_config or {}).get("ai_provider", "none") if self.worker else "none"
-        ai_label = {"gemini": "Gemini", "ollama": "Ollama", "llama-cpp": "GGUF local",
-                    "none": "Ninguna"}.get(provider, "Ninguna")
+        from modules.ui.gemini_settings import ai_status_label
+        ai_label = ai_status_label(
+            provider, (self.worker.gui_config or {}).get("gemini_run_status", {})
+            if self.worker else {})
         summary = ("ANÁLISIS COMPLETADO\n"
                    f"Video original: {self.format_time(original_duration)}  ·  "
                    f"Duración seleccionada: {self.format_time(selected_duration)}\n"
@@ -6594,6 +6601,24 @@ class VideoHighlighterGUI(QWidget):
                                   getattr(self, "_last_segments", []),
                                   getattr(self, "_last_segment_metadata", []), self)
         dialog.exec()
+
+    def run_gemini_diagnostic(self):
+        paths = self.get_file_list()
+        if not paths or not os.path.isfile(paths[0]):
+            self.append_log("⚠️ Carga primero un video para probar Gemini.")
+            return
+        from modules.ui.gemini_settings import gemini_preferences
+        from modules.ui.gemini_diagnostic import GeminiDiagnosticWorker
+        if getattr(self, "_gemini_diagnostic", None) and self._gemini_diagnostic.isRunning():
+            return
+        preferences = gemini_preferences()
+        self._gemini_diagnostic = GeminiDiagnosticWorker(
+            paths[0], preferences["model"], preferences["max_calls"], parent=self)
+        self._gemini_diagnostic.log.connect(self.append_log)
+        self._gemini_diagnostic.result.connect(
+            lambda _: self.simple_page.gemini_diagnostic_btn.setEnabled(True))
+        self.simple_page.gemini_diagnostic_btn.setEnabled(False)
+        self._gemini_diagnostic.start()
 
     def pipeline_cancelled(self):
         """Handle pipeline cancellation"""

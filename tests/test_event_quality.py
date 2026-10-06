@@ -56,7 +56,8 @@ def test_gemini_structured_response_and_invalid_fallback(monkeypatch):
     captured = {}
     answer = {"relevante": True, "categoria": "rescate", "importancia": .9,
               "interes_espectador": .8, "consecuencia": .7,
-              "evento_completo": True, "motivo": "Salva al equipo"}
+              "contexto_suficiente": True, "evento_completo": True,
+              "motivo": "Salva al equipo"}
 
     class Response:
         status_code = 200
@@ -78,18 +79,20 @@ def test_gemini_structured_response_and_invalid_fallback(monkeypatch):
     assert len(captured["json"]["contents"][0]["parts"]) == 2
     assert "secret-for-test" not in str(captured["json"])
     answer["importancia"] = 1.5
-    with pytest.raises(RuntimeError, match="evaluación inválida"):
+    with pytest.raises(RuntimeError, match="schema inválido"):
         client.evaluate_event({"inicio_s": 10})
 
 
 def test_gemini_limits_and_cache_survive_restart(tmp_path, monkeypatch):
     from llm.gemini_event_review import GeminiEventReview
     monkeypatch.setenv("GEMINI_API_KEY", "secret-for-test")
-    monkeypatch.setattr("llm.gemini_event_review.storyboard_parts", lambda *a: [])
+    monkeypatch.setattr("llm.gemini_event_review.storyboard_parts",
+                        lambda *a, **k: [{"inlineData": {"data": "frame"}}] * 3)
     calls = []
     evaluation = {"relevante": True, "categoria": "objetivo", "importancia": .9,
                   "interes_espectador": .8, "consecuencia": .8,
-                  "evento_completo": True, "motivo": "Objetivo completado"}
+                  "contexto_suficiente": True, "evento_completo": True,
+                  "motivo": "Objetivo completado"}
     monkeypatch.setattr("llm.gemini_event_review.GeminiClient.evaluate_event",
                         lambda self, context, storyboard: calls.append(context) or evaluation)
     video = tmp_path / "game.mp4"
@@ -125,3 +128,131 @@ def test_clip_feedback_and_metrics_are_local(tmp_path):
     assert values["perceived_precision"] == 1.0
     assert values["missed_events"] == 1
     assert values["average_duration"] == 60
+
+
+@pytest.mark.parametrize("failure,kind,retryable", [
+    ("timeout", "timeout", True), (429, "HTTP 429", True),
+    (400, "HTTP 400", False), (401, "HTTP 401", False),
+    (403, "HTTP 403", False), (404, "HTTP 404", False),
+    (503, "HTTP 503", True),
+])
+def test_gemini_safe_error_categories(monkeypatch, failure, kind, retryable):
+    import requests
+    from llm.gemini_client import GeminiClient, GeminiEvaluationError
+    monkeypatch.setenv("GEMINI_API_KEY", "secret-for-test")
+
+    class Response:
+        status_code = failure
+        ok = False
+
+    def post(*args, **kwargs):
+        if failure == "timeout":
+            raise requests.exceptions.ReadTimeout("secret-for-test")
+        return Response()
+
+    monkeypatch.setattr("llm.gemini_client.requests.post", post)
+    with pytest.raises(GeminiEvaluationError) as caught:
+        GeminiClient().evaluate_event({})
+    assert caught.value.kind == kind
+    assert caught.value.retryable is retryable
+    assert "secret-for-test" not in str(caught.value)
+
+
+def test_gemini_retry_is_bounded_and_cached(tmp_path, monkeypatch):
+    from llm.gemini_client import GeminiEvaluationError
+    from llm.gemini_event_review import GeminiEventReview
+    monkeypatch.setenv("GEMINI_API_KEY", "secret-for-test")
+    monkeypatch.setattr("llm.gemini_event_review.storyboard_parts",
+                        lambda *a, **k: [{"inlineData": {"data": "frame"}}] * 3)
+    calls = []
+    evaluation = {"relevante": False, "categoria": "actividad_normal",
+                  "importancia": .1, "interes_espectador": .1, "consecuencia": .1,
+                  "contexto_suficiente": True, "evento_completo": True,
+                  "motivo": "Caminar"}
+
+    def evaluate(self, context, frames):
+        calls.append(1)
+        if len(calls) == 1:
+            raise GeminiEvaluationError("HTTP 429", "Límite temporal.", retryable=True)
+        return evaluation
+
+    monkeypatch.setattr("llm.gemini_event_review.GeminiClient.evaluate_event", evaluate)
+    video = tmp_path / "game.mp4"
+    video.write_bytes(b"video")
+    item = {"start": 10., "end": 60., "local_quality": .8,
+            "signals": ["motion_peak"], "reason": "test"}
+    waits = []
+    logs = []
+    reviewer = GeminiEventReview(str(video), cache_dir=str(tmp_path / "gemini"),
+                                  max_candidates=1, max_calls=2,
+                                  sleep_fn=waits.append, log_fn=logs.append)
+    status = reviewer.review([item])
+    assert len(calls) == 2 and waits == [10]
+    assert status["calls"] == 2 and status["rejected"] == 1
+    assert any("HTTP 429" in log and "reintento" in log for log in logs)
+    restarted = GeminiEventReview(str(video), cache_dir=str(tmp_path / "gemini"),
+                                   max_candidates=1, max_calls=2,
+                                   log_fn=lambda _: None)
+    assert restarted.review([item])["cached"] == 1
+    assert len(calls) == 2
+    assert restarted._candidate_key(item, {"x": 1}, []) != restarted._candidate_key(
+        item, {"x": 2}, [])
+    assert restarted._candidate_key(item, {"x": 1}, []) != restarted._candidate_key(
+        item, {"x": 1}, [{"inlineData": {"data": "different"}}])
+
+
+def test_semantic_rejection_prevents_local_refill():
+    from modules.segments.event_segments import build_event_segments
+    score = np.zeros(240)
+    score[50:60] = 10
+    score[160:170] = 10
+
+    def reject_all(items):
+        for item in items:
+            item["gemini"] = {"relevante": False, "categoria": "caminar",
+                              "importancia": .1, "interes_espectador": .1,
+                              "consecuencia": .1, "contexto_suficiente": True,
+                              "evento_completo": True, "motivo": "Rutina"}
+
+    clips, _ = build_event_segments(video_duration=240, score=score,
+                                    semantic_review=reject_all,
+                                    log_fn=lambda _: None)
+    assert clips == []
+
+
+def test_provider_labels_and_narration_gate():
+    from modules.narration.story_run import provider_allows_narration
+    from modules.ui.gemini_settings import ai_status_label
+    assert ai_status_label("none") == "Ninguna"
+    assert ai_status_label("ollama") == "Ollama local"
+    assert ai_status_label("gemini", {"reason": "activo", "valid": 2,
+                                      "planned": 2}) == "Gemini — activo"
+    assert ai_status_label("gemini", {"reason": "parcial", "valid": 1,
+                                      "planned": 2}) == "Gemini — parcial (1/2 candidatos)"
+    assert "fallo" in ai_status_label("gemini", {"reason": "HTTP 503"})
+    assert not provider_allows_narration({"ai_provider": "none"})
+    assert not provider_allows_narration({"ai_provider": "gemini"})
+    assert provider_allows_narration({"ai_provider": "ollama"})
+
+
+def test_two_candidate_diagnostic_reads_only_matching_video_cache(tmp_path):
+    import hashlib
+    from modules.ui.gemini_diagnostic import cached_candidates
+    video = tmp_path / "game.mp4"
+    video.write_bytes(b"game")
+    stat = video.stat()
+    digest = hashlib.sha256(
+        f"{video.absolute()}_{stat.st_size}_{stat.st_mtime}".encode()).hexdigest()
+    cache = {"video_hash": digest, "cache_complete": True,
+             "highlight_segments": [[10, 40], [50, 100], [120, 180]],
+             "highlight_metadata": {"segments_metadata": [
+                 {"local_quality": .2}, {"local_quality": .9},
+                 {"local_quality": .8}]}}
+    (tmp_path / f"{digest}.signature.cache.json").write_text(
+        json.dumps(cache), encoding="utf-8")
+    selected = cached_candidates(str(video), str(tmp_path))
+    assert len(selected) == 2
+    assert [item["start"] for item in selected] == [50, 120]
+    other = tmp_path / "other.mp4"
+    other.write_bytes(b"other")
+    assert cached_candidates(str(other), str(tmp_path)) == []

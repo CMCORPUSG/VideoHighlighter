@@ -41,8 +41,16 @@ def assess_candidate(start: float, end: float, score, signal_curves=None,
         quality *= 0.7
     if present == ["motion_peak"] and arc < 0.67:
         quality *= 0.65
+    peak_seconds = []
+    for offset in np.argsort(window)[::-1]:
+        second = a + int(offset)
+        if all(abs(second - old) >= 8 for old in peak_seconds):
+            peak_seconds.append(second)
+        if len(peak_seconds) == 2:
+            break
     return {"local_quality": round(max(0.0, min(1.0, quality)), 4),
             "signals": present,
+            "peak_seconds": sorted(peak_seconds),
             "reason": f"Contraste {contrast:.2f}; señales {', '.join(present) or 'ninguna'}; desarrollo {arc:.2f}"}
 
 
@@ -52,9 +60,11 @@ def combine_semantic(local_quality: float, evaluation: dict | None) -> float:
     semantic = (0.4 * float(evaluation["importancia"]) +
                 0.35 * float(evaluation["interes_espectador"]) +
                 0.25 * float(evaluation["consecuencia"]))
-    combined = 0.65 * local_quality + 0.35 * semantic
+    combined = 0.3 * local_quality + 0.7 * semantic
     if not evaluation["relevante"]:
         combined *= 0.4
     if not evaluation["evento_completo"]:
         combined *= 0.75
+    if not evaluation.get("contexto_suficiente", True):
+        combined *= 0.5
     return round(max(0.0, min(1.0, combined)), 4)

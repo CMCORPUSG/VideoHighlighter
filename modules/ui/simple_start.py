@@ -258,6 +258,24 @@ class SimpleStartPage(QWidget):
         length_row.addWidget(self.clear_btn)
         root.addLayout(length_row)
 
+        ai_row = QHBoxLayout()
+        ai_row.addWidget(QLabel("Proveedor de IA:"))
+        self.ai_provider = QComboBox()
+        self.ai_provider.addItem("Ninguno", "none")
+        self.ai_provider.addItem("Gemini API", "gemini")
+        self.ai_provider.addItem("Ollama local", "ollama")
+        saved_provider = QSettings("VideoHighlighter", "Gemini").value("provider", "none")
+        self.ai_provider.setCurrentIndex(max(0, self.ai_provider.findData(saved_provider)))
+        self.ai_provider.currentIndexChanged.connect(
+            lambda _: QSettings("VideoHighlighter", "Gemini").setValue(
+                "provider", self.ai_provider.currentData()))
+        ai_row.addWidget(self.ai_provider)
+        self.gemini_settings_btn = QPushButton("Configurar Gemini")
+        self.gemini_settings_btn.clicked.connect(self._open_gemini_settings)
+        ai_row.addWidget(self.gemini_settings_btn)
+        ai_row.addStretch()
+        root.addLayout(ai_row)
+
         self.status = QLabel("Ready")
         self.status.setStyleSheet(f"color: {p.text_dim}; font-weight: 600;")
         root.addWidget(self.status)
@@ -296,8 +314,12 @@ class SimpleStartPage(QWidget):
         self.report_btn = QPushButton("Open report")
         self.report_btn.setVisible(False)
         self.report_btn.clicked.connect(gui.open_why_report)
+        self.review_btn = QPushButton("Revisar y calificar clips")
+        self.review_btn.setVisible(False)
+        self.review_btn.clicked.connect(gui.open_clip_review)
         result_row.addWidget(self.timeline_btn)
         result_row.addWidget(self.report_btn)
+        result_row.addWidget(self.review_btn)
         result_row.addStretch()
         root.addLayout(result_row)
 
@@ -368,6 +390,10 @@ class SimpleStartPage(QWidget):
         key = self.length.currentData()
         return self.custom_minutes.value() if key == "gaming_custom" else int(key.split("_")[-1])
 
+    def _open_gemini_settings(self):
+        from modules.ui.gemini_settings import GeminiSettingsDialog
+        GeminiSettingsDialog(self).exec()
+
     def refresh_files(self, *, update_idle_status: bool = True) -> None:
         self.file_list.clear()
         paths = self._gui.get_file_list()
@@ -384,6 +410,10 @@ class SimpleStartPage(QWidget):
     def show_results(self, on: bool) -> None:
         self.timeline_btn.setVisible(on)
         self.report_btn.setVisible(on)
+        clips_dir = getattr(self._gui, "_last_clips_dir", "")
+        from pathlib import Path
+        self.review_btn.setVisible(bool(on and clips_dir and
+                                        list(Path(clips_dir).glob("clip_*.mp4"))))
 
     def show_completion(self, summary: str, *, has_clips: bool) -> None:
         self.summary.setText(summary)
@@ -391,6 +421,7 @@ class SimpleStartPage(QWidget):
         self.video_btn.setVisible(True)
         self.folder_btn.setVisible(True)
         self.clips_btn.setVisible(has_clips)
+        self.review_btn.setVisible(has_clips)
 
     def attach_chat(self, chat: QWidget | None) -> None:
         """Borrow the app's one chat panel into the folded section.

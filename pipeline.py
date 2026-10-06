@@ -458,6 +458,7 @@ def run_highlighter(video_path, sample_rate=5, gui_config: dict = None,
             config.get("highlights", {}).get("segmentation_mode", "events")
         if gui_config.get("event_mode"):
             SEGMENTATION_MODE = "events"
+        auto_regions = []
         if SEGMENTATION_MODE == "events":
             EXACT_DURATION = None
         # 0.0 = take the best-scoring moments wherever they fall (the original
@@ -2222,6 +2223,38 @@ def run_highlighter(video_path, sample_rate=5, gui_config: dict = None,
 
         if SEGMENTATION_MODE == "events":
             from modules.segments.event_segments import build_event_segments
+            semantic_review = None
+            if (gui_config.get("ai_provider") == "gemini" and
+                    gui_config.get("gemini_mode", "needed") != "off"):
+                from llm.gemini_event_review import GeminiEventReview
+
+                def _candidate_context(item):
+                    a, b = item["start"], item["end"]
+                    objects = sorted({str(name) for sec, names in object_detections.items()
+                                      if a <= float(sec) <= b for name in names})[:20]
+                    actions = sorted({str(seq[4]) for seq in selected_sequences
+                                      if len(seq) >= 5 and seq[0] < b and seq[1] > a})[:20]
+                    speech = " ".join(str(part.get("text", ""))
+                                      for part in transcript_segments
+                                      if part.get("start", 0) < b and part.get("end", 0) > a)
+                    return {"objetos": objects, "acciones": actions,
+                            "transcripcion": speech[:1500],
+                            "cambios_escena": sum(a <= float(s) < b for s, _ in scenes)}
+
+                try:
+                    reviewer = GeminiEventReview(
+                        processed_video_path,
+                        model=gui_config.get("gemini_model", "gemini-3.5-flash-lite"),
+                        mode=gui_config.get("gemini_mode", "needed"),
+                        max_candidates=gui_config.get("gemini_max_candidates", 30),
+                        max_calls=gui_config.get("gemini_max_calls", 30),
+                        cache_dir=os.path.join(str(gui_config.get("cache_dir", "./cache")),
+                                               "gemini_events"),
+                        log_fn=log, cancel_flag=cancel_flag,
+                        context_fn=_candidate_context)
+                    semantic_review = reviewer.review
+                except (OSError, ValueError) as exc:
+                    log("⚠️ Revisión Gemini no disponible; continúa el ranking local.")
             segments, auto_regions = build_event_segments(
                 video_duration=video_duration, score=score, scenes=scenes,
                 motion_events=motion_events, motion_peaks=motion_peaks,
@@ -2229,7 +2262,17 @@ def run_highlighter(video_path, sample_rate=5, gui_config: dict = None,
                 action_sequences=selected_sequences,
                 keyword_matches=keyword_matches,
                 loudness_bursts=loudness_bursts,
-                target_duration=target_duration, log_fn=log,
+                target_duration=target_duration,
+                signal_curves={
+                    "motion_peak": motion_peak_score,
+                    "audio": audio_score,
+                    "loudness_burst": loudness_burst_score,
+                    "object": object_score,
+                    "action": action_score,
+                    "keyword": keyword_score,
+                },
+                semantic_review=semantic_review,
+                log_fn=log,
             )
         elif SEGMENTATION_MODE == "legacy_auto" or CLIP_TIME == 0:
             # ========== AUTO-SEGMENTATION MODE ==========
@@ -2522,6 +2565,8 @@ def run_highlighter(video_path, sample_rate=5, gui_config: dict = None,
                     'clip_time': CLIP_TIME,
                     'segmentation_mode': SEGMENTATION_MODE,
                     'event_selection_version': 1 if SEGMENTATION_MODE == 'events' else None,
+                    'gemini_model': gui_config.get('gemini_model') if SEGMENTATION_MODE == 'events' else None,
+                    'gemini_mode': gui_config.get('gemini_mode') if SEGMENTATION_MODE == 'events' else None,
                     'highlight_objects': highlight_objects,
                     'interesting_actions': interesting_actions,
                     'scene_points': SCENE_POINTS,
@@ -2558,6 +2603,10 @@ def run_highlighter(video_path, sample_rate=5, gui_config: dict = None,
                         primary_reason = "audio_peaks"
                     
                     # Make sure all values are Python native types
+                    event_metadata = next((item for item in auto_regions
+                                           if isinstance(item, dict) and
+                                           abs(item.get("start", -1) - start) < 0.01 and
+                                           abs(item.get("end", -1) - end) < 0.01), {})
                     segments_metadata.append({
                         'score': float(avg_score) if avg_score != 0 else 0.0,
                         'signals': {
@@ -2566,7 +2615,11 @@ def run_highlighter(video_path, sample_rate=5, gui_config: dict = None,
                             'motion': 1.0 if start in motion_peaks_set else 0.0,
                             'audio': 1.0 if start in audio_set else 0.0
                         },
-                        'primary_reason': str(primary_reason)
+                        'primary_reason': str(primary_reason),
+                        'local_quality': event_metadata.get('local_quality'),
+                        'final_quality': event_metadata.get('final_quality'),
+                        'event_signals': event_metadata.get('signals', []),
+                        'gemini': event_metadata.get('gemini'),
                     })
                 
                 # Convert score_info values to Python native types

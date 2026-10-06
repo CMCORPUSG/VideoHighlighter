@@ -700,6 +700,10 @@ class LLMChatWidget(QWidget):
         self.connect_btn.clicked.connect(self._connect_llm)
         row1.addWidget(self.connect_btn)
 
+        self.gemini_settings_btn = QPushButton("Configurar Gemini")
+        self.gemini_settings_btn.clicked.connect(self._open_gemini_settings)
+        row1.addWidget(self.gemini_settings_btn)
+
         self.status_label = QLabel("IA opcional desactivada")
         self.status_label.setStyleSheet("color:#999;font-style:italic;")
         row1.addWidget(self.status_label)
@@ -1826,6 +1830,7 @@ class LLMChatWidget(QWidget):
         self.gguf_row_widget.setVisible(is_gguf)
         self.mmproj_row_widget.setVisible(is_gguf)
         self.refresh_btn.setVisible(backend == "ollama")
+        self.gemini_settings_btn.setVisible(backend == "gemini")
         self.model_combo.setEnabled(backend in ("ollama", "gemini"))
         self.connect_btn.setEnabled(backend != "none")
         self._search_section.setVisible(backend not in ("gemini", "none"))
@@ -1834,8 +1839,12 @@ class LLMChatWidget(QWidget):
             self._populate_recent_gguf()
         elif backend == "gemini":
             self.model_combo.clear()
-            self.model_combo.addItem("gemini-3.5-flash-lite")
-            self.status_label.setText("Usa GEMINI_API_KEY; solo se envían datos de análisis.")
+            from modules.ui.gemini_settings import gemini_preferences
+            from llm.gemini_credentials import get_key
+            self.model_combo.addItems(["gemini-3.5-flash-lite", "gemini-3.5-flash"])
+            self.model_combo.setCurrentText(gemini_preferences()["model"])
+            self.status_label.setText("Gemini listo para probar" if get_key()
+                                      else "API key no configurada")
         elif backend == "none":
             self.model_combo.clear()
             self._llm = None
@@ -1861,6 +1870,11 @@ class LLMChatWidget(QWidget):
         except Exception:                       # pragma: no cover - defensive
             pass
         if self.backend_combo.currentData() == "ollama":
+            self._refresh_models()
+
+    def _open_gemini_settings(self):
+        from modules.ui.gemini_settings import GeminiSettingsDialog
+        if GeminiSettingsDialog(self).exec():
             self._refresh_models()
 
     def _populate_recent_gguf(self):
@@ -1897,7 +1911,9 @@ class LLMChatWidget(QWidget):
         if backend == "none":
             return
         if backend == "gemini":
-            self.model_combo.addItem("gemini-3.5-flash-lite")
+            from modules.ui.gemini_settings import gemini_preferences
+            self.model_combo.addItems(["gemini-3.5-flash-lite", "gemini-3.5-flash"])
+            self.model_combo.setCurrentText(gemini_preferences()["model"])
             return
         if backend == "llama-cpp":
             self.model_combo.addItem("(select GGUF file below)")
@@ -2016,13 +2032,13 @@ class LLMChatWidget(QWidget):
                 n_obj = len(self._analysis_data.get("objects", []))
                 n_act = len(self._analysis_data.get("actions", []))
                 self._append_system(
-                    f"Connected to {model if backend=='ollama' else os.path.basename(gguf_path)}. "
-                    f"Context ready: {n_obj} object entries, {n_act} actions."
+                    f"Conectado a {model if backend != 'llama-cpp' else os.path.basename(gguf_path)}. "
+                    f"Contexto disponible: {n_obj} registros de objetos y {n_act} acciones."
                 )
             else:
                 self._append_system(
-                    f"Connected to {model if backend=='ollama' else os.path.basename(gguf_path)}. "
-                    f"WARNING: No video context! Use 'Load Cache' first."
+                    f"Conectado a {model if backend != 'llama-cpp' else os.path.basename(gguf_path)}. "
+                    "Sin contexto del video. Carga la caché primero."
                 )
 
         except Exception as e:

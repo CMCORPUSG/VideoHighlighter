@@ -5923,6 +5923,19 @@ class VideoHighlighterGUI(QWidget):
             else:
                 apply_simple_run(config, length)
 
+        from modules.ui.gemini_settings import gemini_preferences
+        gemini = gemini_preferences()
+        page = getattr(self, "simple_page", None)
+        provider = (page.ai_provider.currentData() if self._simple_run and page is not None
+                    else self.llm_chat.backend_combo.currentData())
+        config.update({
+            "ai_provider": provider,
+            "gemini_model": gemini["model"],
+            "gemini_mode": gemini["mode"],
+            "gemini_max_candidates": gemini["max_candidates"],
+            "gemini_max_calls": gemini["max_calls"],
+        })
+
         # Remove None values
         config = {k: v for k,v in config.items() if v is not None}
 
@@ -6513,6 +6526,8 @@ class VideoHighlighterGUI(QWidget):
         self._last_clips_dir = clips_dir
         clips_count = len(list(Path(clips_dir).glob("*.mp4"))) if os.path.isdir(clips_dir) else 0
         selected_count = clips_count
+        self._last_segments = []
+        self._last_segment_metadata = []
         if source and os.path.isfile(source) and self.worker:
             try:
                 run_config = self.worker.gui_config or {}
@@ -6522,6 +6537,9 @@ class VideoHighlighterGUI(QWidget):
                 analyzed = VideoAnalysisCache().load(source, params=params)
                 if analyzed and "highlight_segments" in analyzed:
                     selected_count = len(analyzed["highlight_segments"])
+                    self._last_segments = analyzed["highlight_segments"]
+                    self._last_segment_metadata = (analyzed.get("highlight_metadata") or {}).get(
+                        "segments_metadata", [])
             except Exception:
                 pass
         try:
@@ -6539,7 +6557,7 @@ class VideoHighlighterGUI(QWidget):
         export_time = self._export_seconds
         export_display = (self.format_time(export_time) if export_time is not None
                           else "No registrado")
-        provider = self.llm_chat.backend_combo.currentData() if hasattr(self, "llm_chat") else "none"
+        provider = (self.worker.gui_config or {}).get("ai_provider", "none") if self.worker else "none"
         ai_label = {"gemini": "Gemini", "ollama": "Ollama", "llama-cpp": "GGUF local",
                     "none": "Ninguna"}.get(provider, "Ninguna")
         summary = ("ANÁLISIS COMPLETADO\n"
@@ -6564,6 +6582,18 @@ class VideoHighlighterGUI(QWidget):
                 os.path.dirname(output))
         if path and os.path.exists(path):
             QDesktopServices.openUrl(QUrl.fromLocalFile(os.path.abspath(path)))
+
+    def open_clip_review(self):
+        source_paths = self.get_file_list()
+        clips_dir = getattr(self, "_last_clips_dir", "")
+        if not source_paths or not clips_dir or not os.path.isdir(clips_dir):
+            self.append_log("⚠️ Todavía no hay clips exportados para revisar.")
+            return
+        from modules.ui.clip_review import ClipReviewDialog
+        dialog = ClipReviewDialog(source_paths[0], clips_dir,
+                                  getattr(self, "_last_segments", []),
+                                  getattr(self, "_last_segment_metadata", []), self)
+        dialog.exec()
 
     def pipeline_cancelled(self):
         """Handle pipeline cancellation"""
@@ -6737,14 +6767,14 @@ class VideoHighlighterGUI(QWidget):
         """The JSON beside the newest report, or None with a logged reason."""
         found = self._why_report_candidates()
         if not found:
-            self.append_log("⚠️ No highlight report yet — run the highlighter "
-                            "first, the summary is written into that report.")
+            self.append_log("⚠️ Aún no hay un reporte de momentos destacados. "
+                            "Ejecuta el análisis para generar el resumen.")
             return None
         newest = max(found, key=lambda p: os.path.getmtime(p))
         json_path = os.path.splitext(newest)[0] + ".json"
         if not os.path.exists(json_path):
-            self.append_log(f"⚠️ {os.path.basename(newest)} has no .json beside "
-                            "it, so there is nothing to summarise from.")
+            self.append_log(f"⚠️ No se encontró el archivo JSON junto a "
+                            f"{os.path.basename(newest)}; no hay datos para resumir.")
             return None
         return json_path
 

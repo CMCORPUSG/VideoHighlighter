@@ -5,9 +5,9 @@ cuts can add score, but cannot start or end an event on their own.
 """
 from __future__ import annotations
 
-from math import sqrt
-
 import numpy as np
+
+from modules.segments.event_rank import assess_candidate, combine_semantic
 
 
 def _time(value):
@@ -92,7 +92,8 @@ def build_event_segments(*, video_duration, score, scenes=None,
                          motion_events=None, motion_peaks=None, audio_peaks=None,
                          object_detections=None, action_sequences=None,
                          keyword_matches=None, loudness_bursts=None,
-                         target_duration=900, log_fn=print):
+                         target_duration=900, signal_curves=None,
+                         semantic_review=None, log_fn=print):
     """Return non-overlapping, variable-length event clips in source order.
 
     A 15-second context margin is a starting point. Nearby evidence extends the
@@ -158,27 +159,58 @@ def build_event_segments(*, video_duration, score, scenes=None,
     for start, end, labels in candidates:
         if end <= start:
             continue
-        a, b = max(0, int(start)), min(len(values), int(np.ceil(end)))
-        strength = float(np.sum(ranking_values[a:b])) / sqrt(max(1.0, end - start))
-        ranked.append((strength, start, end, labels))
-    ranked.sort(key=lambda item: item[0], reverse=True)
+        evidence = assess_candidate(start, end, ranking_values,
+                                    signal_curves=signal_curves, labels=labels)
+        ranked.append({"start": start, "end": end, "labels": sorted(labels),
+                       **evidence})
+    ranked.sort(key=lambda item: item["local_quality"], reverse=True)
+    if not ranked:
+        return [], []
+    floor = max(0.46, float(np.percentile(
+        [item["local_quality"] for item in ranked], 65))) if len(ranked) >= 5 else 0.36
+    if semantic_review and ranked:
+        try:
+            semantic_review(ranked)
+        except Exception:
+            log_fn("⚠️ Falló la revisión semántica; continúa el ranking local.")
+    finalists = [item for item in ranked
+                 if item["local_quality"] >= floor or
+                 (item.get("gemini", {}).get("relevante") and
+                  item.get("gemini", {}).get("interes_espectador", 0) >= 0.75)]
+    for item in finalists:
+        item["final_quality"] = combine_semantic(
+            item["local_quality"], item.get("gemini"))
+    finalists.sort(key=lambda item: item["final_quality"], reverse=True)
 
     budget = max(0.0, float(target_duration))
     selected = []
     used = 0.0
-    for _, start, end, labels in ranked:
+    for item in finalists:
+        start, end = item["start"], item["end"]
         length = end - start
+        if item["final_quality"] < 0.46:
+            continue
+        # Only meaningful action/object/keyword labels affect diversity. A
+        # common "activity" signal must not suppress all later events.
+        categories = {label for label in item["labels"]
+                      if label.startswith(("action:", "keyword:", "object:"))}
+        if categories and selected:
+            repeated = sum(bool(categories & {label for label in earlier["labels"]
+                                              if label.startswith(("action:", "keyword:", "object:"))})
+                           for earlier in selected)
+            if repeated >= 3 and item["final_quality"] < 0.85:
+                continue
         if budget and used + length > budget:
             # Select an entire event only if it is closer to the target than
             # stopping here. Never manufacture a partial ending.
             if selected and used + length - budget >= budget - used:
                 continue
-        selected.append((start, end, labels))
+        selected.append(item)
         used += length
         if budget and used >= budget:
             break
-    selected.sort(key=lambda item: item[0])
-    segments = [(start, end) for start, end, _ in selected]
+    selected.sort(key=lambda item: item["start"])
+    segments = [(item["start"], item["end"]) for item in selected]
     log_fn(f"🎮 {len(segments)} eventos completos; {used:.1f} s "
            f"(objetivo aproximado: {budget:.1f} s)")
     return segments, selected

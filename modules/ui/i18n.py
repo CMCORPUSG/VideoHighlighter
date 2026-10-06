@@ -13,6 +13,9 @@ from PySide6.QtWidgets import (QAbstractButton, QComboBox, QGroupBox, QLabel,
 
 
 ES = {
+    "click to add another  ·  or drop more here": "Haz clic para agregar otro video · o arrastra más aquí",
+    "why a moment was picked": "por qué se eligió un momento",
+    "ask why these moments were picked": "pregunta por qué se eligieron estos momentos",
     "Segment mode:": "Tipo de segmento:",
     "Complete events": "Eventos completos",
     "Fixed windows (legacy)": "Ventanas fijas (anterior)",

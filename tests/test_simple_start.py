@@ -24,7 +24,8 @@ def test_simple_preset_can_score_without_any_knobs():
     assert cfg["write_highlight_report"] is True
     medium = apply_simple_run({}, "medium")
     assert medium["max_duration"] == 240
-    assert medium["clip_time"] == 10
+    assert medium["clip_time"] == 0
+    assert medium["event_mode"] is True
 
 
 def test_main_keeps_the_full_ui_and_adds_the_stack():

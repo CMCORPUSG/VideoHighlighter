@@ -33,18 +33,18 @@ SIMPLE_SCORING = {
 
 # max_duration seconds, clip_time seconds
 SIMPLE_LENGTHS = {
-    "short": (90, 8),
-    "medium": (240, 10),
-    "long": (420, 12),
+    "short": 90,
+    "medium": 240,
+    "long": 420,
 }
 
 
 def apply_simple_run(config: dict, length: str = "medium") -> dict:
     """Overlay the one-button preset onto a pipeline config (in place)."""
     config.update(SIMPLE_SCORING)
-    max_dur, clip = SIMPLE_LENGTHS.get(length, SIMPLE_LENGTHS["medium"])
-    config["max_duration"] = max_dur
-    config["clip_time"] = clip
+    config["max_duration"] = SIMPLE_LENGTHS.get(length, SIMPLE_LENGTHS["medium"])
+    config["clip_time"] = 0
+    config["event_mode"] = True
     config["exact_duration"] = None
     return config
 
@@ -58,7 +58,10 @@ def apply_gaming_run(config: dict, minutes: int = 10) -> dict:
     minutes = max(1, min(180, int(minutes)))
     config.update({
         "scene_points": 2,
-        "motion_event_points": 4,
+        # The detector can emit tens of thousands of low-level motion samples
+        # in a long VOD. Peaks retain the useful changes without making every
+        # second of ordinary movement look like one endless event.
+        "motion_event_points": 0,
         "motion_peak_points": 5,
         "audio_peak_points": 2,
         "loudness_burst_points": 3,
@@ -72,7 +75,8 @@ def apply_gaming_run(config: dict, minutes: int = 10) -> dict:
         "create_subtitles": False,
         "max_duration": minutes * 60,
         "exact_duration": None,
-        "clip_time": 12,
+        "clip_time": 0,
+        "event_mode": True,
         "coverage": 0.15,
         "export_separate_clips": True,
         "write_highlight_report": True,

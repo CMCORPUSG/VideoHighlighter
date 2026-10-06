@@ -58,13 +58,16 @@ class SwapSession:
                  *,
                  video_duration: float,
                  clip_time: int,
-                 duration_mode: str = "MAX"):
+                 duration_mode: str = "MAX",
+                 segmentation_mode: str = "fixed"):
         self.score = np.asarray(score, dtype=float)
         self.segments = [(float(s), float(e)) for s, e in segments]
         self.video_duration = float(video_duration)
         self.clip_time = int(clip_time)
         self.duration_mode = str(duration_mode)
+        self.segmentation_mode = str(segmentation_mode)
         self.rejected: list[tuple[float, float]] = []
+        self._undo: list[tuple[tuple[float, float], tuple[float, float]]] = []
 
     @classmethod
     def from_report(cls, report) -> "SwapSession":
@@ -86,6 +89,7 @@ class SwapSession:
             video_duration=float((report.get("video") or {}).get("duration") or 0.0),
             clip_time=clip_time,
             duration_mode=str(settings.get("duration_mode") or "MAX"),
+            segmentation_mode=str(settings.get("segmentation_mode") or "fixed"),
         )
 
     @property
@@ -101,6 +105,26 @@ class SwapSession:
     def swap(self, index: int) -> bool:
         """Replace the clip at ``index``. False when nothing else is available."""
         replaced = self.segments[index]
+        if self.segmentation_mode == "events":
+            from modules.segments.event_segments import build_event_segments
+            candidates, _ = build_event_segments(
+                video_duration=self.video_duration, score=self.score,
+                target_duration=self.video_duration, log_fn=lambda _: None)
+            occupied = self.segments[:index] + self.segments[index + 1:] + self.rejected + [replaced]
+            alternatives = [seg for seg in candidates
+                            if not any(seg[0] < end and seg[1] > start
+                                       for start, end in occupied)
+                            and seg != replaced]
+            if not alternatives:
+                return False
+            chosen = max(alternatives,
+                         key=lambda seg: float(np.sum(
+                             self.score[int(seg[0]):int(np.ceil(seg[1]))])) /
+                         max(1.0, (seg[1] - seg[0]) ** 0.5))
+            self.rejected.append(replaced)
+            self._undo.append((replaced, chosen))
+            self.segments = sorted(self.segments[:index] + self.segments[index + 1:] + [chosen])
+            return True
         swapped = swap_segment(
             self.score,
             segments=self.segments,
@@ -113,6 +137,9 @@ class SwapSession:
         if swapped is None:
             return False
         self.rejected.append(replaced)
+        new_segment = next((seg for seg in swapped if seg not in self.segments), None)
+        if new_segment is not None:
+            self._undo.append((replaced, new_segment))
         self.segments = swapped
         return True
 
@@ -125,6 +152,11 @@ class SwapSession:
         if not self.rejected:
             return False
         restored = self.rejected.pop()
+        if self._undo:
+            original, replacement = self._undo.pop()
+            remaining = [seg for seg in self.segments if seg != replacement]
+            self.segments = sorted(remaining + [original], key=lambda seg: seg[0])
+            return True
         # Whatever occupies the slot the restored clip would overlap is the one
         # that took its place.
         remaining = [

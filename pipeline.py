@@ -451,7 +451,15 @@ def run_highlighter(video_path, sample_rate=5, gui_config: dict = None,
         OUTPUT_FILE = gui_config.get("output_file") or config.get("video", {}).get("output", "highlight.mp4")
         MAX_DURATION = gui_config.get("max_duration") or config.get("highlights", {}).get("max_duration", 420)
         EXACT_DURATION = gui_config.get("exact_duration") or config.get("highlights", {}).get("exact_duration", None)
-        CLIP_TIME = gui_config.get("clip_time") or config.get("highlights", {}).get("clip_time", 10)
+        CLIP_TIME = gui_config.get("clip_time")
+        if CLIP_TIME is None:
+            CLIP_TIME = config.get("highlights", {}).get("clip_time", 10)
+        SEGMENTATION_MODE = gui_config.get("segmentation_mode") or \
+            config.get("highlights", {}).get("segmentation_mode", "events")
+        if gui_config.get("event_mode"):
+            SEGMENTATION_MODE = "events"
+        if SEGMENTATION_MODE == "events":
+            EXACT_DURATION = None
         # 0.0 = take the best-scoring moments wherever they fall (the original
         # behaviour); 1.0 = spread the cut evenly so the whole video is covered.
         COVERAGE = gui_config.get("coverage")
@@ -2212,7 +2220,18 @@ def run_highlighter(video_path, sample_rate=5, gui_config: dict = None,
             log(f"✅ Rebuilt {len(selected_sequences)} action sequences from "
                 f"{len(action_detections)} cached detections")
 
-        if CLIP_TIME == 0:
+        if SEGMENTATION_MODE == "events":
+            from modules.segments.event_segments import build_event_segments
+            segments, auto_regions = build_event_segments(
+                video_duration=video_duration, score=score, scenes=scenes,
+                motion_events=motion_events, motion_peaks=motion_peaks,
+                audio_peaks=audio_peaks, object_detections=object_detections,
+                action_sequences=selected_sequences,
+                keyword_matches=keyword_matches,
+                loudness_bursts=loudness_bursts,
+                target_duration=target_duration, log_fn=log,
+            )
+        elif SEGMENTATION_MODE == "legacy_auto" or CLIP_TIME == 0:
             # ========== AUTO-SEGMENTATION MODE ==========
             log("🔧 CLIP_TIME=0 → using auto-segmentation (variable-length clips)")
             
@@ -2239,7 +2258,7 @@ def run_highlighter(video_path, sample_rate=5, gui_config: dict = None,
             segments = select_fixed_window_segments(
                 score,
                 video_duration=video_duration,
-                clip_time=CLIP_TIME,
+                clip_time=max(1, int(CLIP_TIME)),
                 target_duration=target_duration,
                 duration_mode=duration_mode,
                 confidence_by_sec=peak_confidence_by_sec(detections_by_sec),
@@ -2375,6 +2394,7 @@ def run_highlighter(video_path, sample_rate=5, gui_config: dict = None,
                     action_percentiles=action_type_percentiles,
                     settings={
                         "clip_time": CLIP_TIME,
+                        "segmentation_mode": SEGMENTATION_MODE,
                         "duration_mode": duration_mode,
                         "scene_points": SCENE_POINTS,
                         "motion_event_points": MOTION_EVENT_POINTS,
@@ -2500,6 +2520,8 @@ def run_highlighter(video_path, sample_rate=5, gui_config: dict = None,
                     'max_duration': MAX_DURATION,
                     'exact_duration': EXACT_DURATION if EXACT_DURATION else None,
                     'clip_time': CLIP_TIME,
+                    'segmentation_mode': SEGMENTATION_MODE,
+                    'event_selection_version': 1 if SEGMENTATION_MODE == 'events' else None,
                     'highlight_objects': highlight_objects,
                     'interesting_actions': interesting_actions,
                     'scene_points': SCENE_POINTS,

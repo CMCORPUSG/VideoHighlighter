@@ -108,6 +108,9 @@ update_state.json
 .update-old/
 publish/
 .secrets/
+.env
+.env.*
+!.env.example
 
 # User-defined composition rules and the hand labels used to tune them. The
 # event names and the spans are the user's own, about their own material, and

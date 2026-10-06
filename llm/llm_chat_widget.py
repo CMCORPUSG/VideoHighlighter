@@ -674,7 +674,9 @@ class LLMChatWidget(QWidget):
         row1 = QHBoxLayout()
         row1.addWidget(QLabel("Backend:"))
         self.backend_combo = QComboBox()
-        self.backend_combo.addItem("Ollama (local server)", "ollama")
+        self.backend_combo.addItem("Ninguno", "none")
+        self.backend_combo.addItem("Ollama local", "ollama")
+        self.backend_combo.addItem("Gemini API", "gemini")
         self.backend_combo.addItem("llama-cpp (GGUF file)", "llama-cpp")
         self.backend_combo.currentIndexChanged.connect(self._on_backend_changed)
         row1.addWidget(self.backend_combo)
@@ -691,14 +693,14 @@ class LLMChatWidget(QWidget):
         row1.addWidget(self.refresh_btn)
 
         # Connect + status share this row (was a separate row) to save vertical space
-        self.connect_btn = QPushButton("Connect")
+        self.connect_btn = QPushButton("Probar conexión")
         self.connect_btn.setStyleSheet(
             f"QPushButton{{background:{THEME.success};color:white;font-weight:bold;padding:6px 16px;}}"
         )
         self.connect_btn.clicked.connect(self._connect_llm)
         row1.addWidget(self.connect_btn)
 
-        self.status_label = QLabel("Not connected")
+        self.status_label = QLabel("IA opcional desactivada")
         self.status_label.setStyleSheet("color:#999;font-style:italic;")
         row1.addWidget(self.status_label)
         row1.addStretch()
@@ -814,6 +816,7 @@ class LLMChatWidget(QWidget):
         # Visual search — its own foldable section, sibling of the settings
         # (it used to be nested inside them, so it vanished with them too).
         search_group = CollapsibleSection("Visual Search", settings_key="llm/visual-search")
+        self._search_section = search_group
         search_layout = QHBoxLayout()
         
         search_layout.addWidget(QLabel("Search for:"))
@@ -1001,7 +1004,7 @@ class LLMChatWidget(QWidget):
 
         root.addLayout(input_layout)
         self.setLayout(root)
-        self._refresh_models()
+        self._on_backend_changed(self.backend_combo.currentIndex())
 
     # --------------------------------------------------------- Public API
 
@@ -1803,15 +1806,40 @@ class LLMChatWidget(QWidget):
 
     def _on_backend_changed(self, _index):
         backend = self.backend_combo.currentData()
+        if backend != getattr(self, "_connected_backend", None):
+            old_llm = getattr(self, "_llm", None)
+            if old_llm is not None:
+                try:
+                    old_llm.unload()
+                except Exception:
+                    pass
+            self._llm = None
+            if getattr(self, "reasoning_engine", None) is not None:
+                self.reasoning_engine.llm = None
+            self._connected_backend = None
+            self.input_field.setEnabled(False)
+            self.send_btn.setEnabled(False)
         is_gguf = backend == "llama-cpp"
-        self.ollama_row_widget.setVisible(not is_gguf)
+        self.ollama_row_widget.setVisible(backend == "ollama")
         self.gguf_row_widget.setVisible(is_gguf)
         self.mmproj_row_widget.setVisible(is_gguf)
-        self.refresh_btn.setVisible(not is_gguf)
-        self.model_combo.setEnabled(not is_gguf)
+        self.refresh_btn.setVisible(backend == "ollama")
+        self.model_combo.setEnabled(backend in ("ollama", "gemini"))
+        self.connect_btn.setEnabled(backend != "none")
+        self._search_section.setVisible(backend != "gemini")
 
         if is_gguf:
             self._populate_recent_gguf()
+        elif backend == "gemini":
+            self.model_combo.clear()
+            self.model_combo.addItem("gemini-3.5-flash-lite")
+            self.status_label.setText("Usa GEMINI_API_KEY; solo se envían datos de análisis.")
+        elif backend == "none":
+            self.model_combo.clear()
+            self._llm = None
+            self.input_field.setEnabled(False)
+            self.send_btn.setEnabled(False)
+            self.status_label.setText("IA opcional desactivada")
         else:
             self._refresh_models()
 
@@ -1864,6 +1892,11 @@ class LLMChatWidget(QWidget):
         self.model_combo.clear()
         backend = self.backend_combo.currentData()
         
+        if backend == "none":
+            return
+        if backend == "gemini":
+            self.model_combo.addItem("gemini-3.5-flash-lite")
+            return
         if backend == "llama-cpp":
             self.model_combo.addItem("(select GGUF file below)")
             return
@@ -1883,9 +1916,7 @@ class LLMChatWidget(QWidget):
             else:
                 for m in ["llama3.2", "llama3.2-vision", "llava", "bakllava", "llava-llama3"]:
                     self.model_combo.addItem(m)
-                self.status_label.setText(
-                    f"No Ollama answered{where or ' on this machine'} - showing "
-                    "defaults (vision models recommended)")
+                self.status_label.setText("Ollama no está conectado. Esta función es opcional.")
                 self.status_label.setStyleSheet("color:#ff9800;font-style:italic;")
 
     def _browse_gguf(self):
@@ -1919,6 +1950,9 @@ class LLMChatWidget(QWidget):
                 self._llm = LLMModule(backend="ollama", model=model,
                                       base_url=resolve_ollama_host(),
                                       log_fn=self._log)
+            elif backend == "gemini":
+                from llm.gemini_client import GeminiClient
+                self._llm = GeminiClient(model=model)
             elif backend == "llama-cpp":
                 gguf_path = self.gguf_path_input.text().strip()
                 if not gguf_path:
@@ -1940,12 +1974,18 @@ class LLMChatWidget(QWidget):
                 raise ValueError(f"Unknown backend: {backend}")
 
             self._llm.load()
+            if backend == "gemini":
+                self._llm.query("Responde solamente OK.", free_chat_mode=True,
+                                max_tokens=16, timeout=15)
+            self._connected_backend = backend
 
-            self._save_gguf_to_recent(gguf_path)
-            settings = QSettings(self.SETTINGS_KEY, "LLMChat")
-            settings.setValue("last_gguf_path", gguf_path)
-            if mmproj_path:
-                settings.setValue("last_mmproj_path", mmproj_path)
+            if backend == "llama-cpp":
+                self._save_gguf_to_recent(gguf_path)
+            if backend == "llama-cpp":
+                settings = QSettings(self.SETTINGS_KEY, "LLMChat")
+                settings.setValue("last_gguf_path", gguf_path)
+                if mmproj_path:
+                    settings.setValue("last_mmproj_path", mmproj_path)
 
             if backend == "llama-cpp":
                 model_name = os.path.basename(gguf_path)
@@ -1953,12 +1993,12 @@ class LLMChatWidget(QWidget):
                     model_name += " (with vision)"
                 self.status_label.setText(f"Connected: {model_name}")
             else:
-                self.status_label.setText(f"Connected: {model}")
+                self.status_label.setText(f"Conectado correctamente: {model}")
                 
             self.status_label.setStyleSheet(f"color:{THEME.success};font-weight:bold;")
             # Folded section header mirrors the connection state
             self._settings_section.set_hint(self.status_label.text())
-            self.connect_btn.setText("Reconnect")
+            self.connect_btn.setText("Reconectar")
             self.input_field.setEnabled(True)
             self.send_btn.setEnabled(True)
 
@@ -1988,6 +2028,7 @@ class LLMChatWidget(QWidget):
             self.status_label.setStyleSheet("color:#f44336;font-style:italic;")
             self.input_field.setEnabled(False)
             self.send_btn.setEnabled(False)
+            self._connected_backend = None
         finally:
             self.connect_btn.setEnabled(True)
 
@@ -2050,7 +2091,7 @@ class LLMChatWidget(QWidget):
                 return
 
         # Parse search requests from chat (e.g. "search for explosion every 60s")
-        if self._try_parse_chat_search(text):
+        if self.backend_combo.currentData() != "gemini" and self._try_parse_chat_search(text):
             self._append_user(text)
             self.input_field.clear()
             return
@@ -2088,6 +2129,7 @@ class LLMChatWidget(QWidget):
         self.send_btn.setEnabled(False)
         self.send_btn.setText("...")
         self.stop_btn.setEnabled(True)
+        self.backend_combo.setEnabled(False)
 
         self._append_html(
             '<div style="color:#8BC34A;margin-top:8px;"><b>Assistant:</b></div>'
@@ -2122,7 +2164,9 @@ class LLMChatWidget(QWidget):
         frame_b64 = None
         _text_lower = actual_message.lower()
         
-        if force_visual:
+        if force_visual and self.backend_combo.currentData() == "gemini":
+            self._append_system("Gemini usa los resultados locales; la búsqueda visual permanece local.")
+        elif force_visual:
             if self._timeline_bridge and self._timeline_bridge._window:
                 window = self._timeline_bridge._window
                 if hasattr(window, 'capture_current_frame_base64'):
@@ -2151,7 +2195,9 @@ class LLMChatWidget(QWidget):
                                     ["current frame", "this frame", "what do you see", 
                                     "what's happening now", "describe this frame"])
             
-            if (_wants_vision or _asks_about_current) and self._timeline_bridge and self._timeline_bridge._window:
+            if (self.backend_combo.currentData() != "gemini" and
+                    (_wants_vision or _asks_about_current) and
+                    self._timeline_bridge and self._timeline_bridge._window):
                 window = self._timeline_bridge._window
                 if hasattr(window, 'capture_current_frame_base64'):
                     frame_b64 = window.capture_current_frame_base64()
@@ -2357,7 +2403,8 @@ class LLMChatWidget(QWidget):
     def _on_response_done(self, full_text: str):
         self._chat_history.append({"role": "assistant", "content": full_text})
 
-        if self._timeline_bridge and self._timeline_bridge.is_connected:
+        if (self.backend_combo.currentData() != "gemini" and
+                self._timeline_bridge and self._timeline_bridge.is_connected):
             try:
                 from .llm_timeline_bridge import parse_commands
                 commands = parse_commands(full_text)
@@ -2387,6 +2434,7 @@ class LLMChatWidget(QWidget):
         self.send_btn.setEnabled(True)
         self.send_btn.setText("Send")
         self.stop_btn.setEnabled(False)
+        self.backend_combo.setEnabled(True)
         self.input_field.setFocus()
 
     @Slot(str)
@@ -2398,6 +2446,7 @@ class LLMChatWidget(QWidget):
         self.send_btn.setEnabled(True)
         self.send_btn.setText("Send")
         self.stop_btn.setEnabled(False)
+        self.backend_combo.setEnabled(True)
 
     def _clear_chat(self):
         self.chat_display.clear()
